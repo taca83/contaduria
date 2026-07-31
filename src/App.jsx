@@ -801,6 +801,7 @@ function ImportarTab({ onImport }) {
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
   const [fileName, setFileName] = useState("");
+  const [lastImportMsg, setLastImportMsg] = useState(null);
 
   function handleFile(e) {
     const file = e.target.files?.[0];
@@ -826,17 +827,31 @@ function ImportarTab({ onImport }) {
     setText("");
     setResult(null);
     if (res && typeof res === "object") {
-      const msg = res.duplicates > 0
-        ? `Se importaron ${res.imported} movimientos. Se descartaron ${res.duplicates} por ser duplicados (misma fecha, monto, descripción y cuenta que uno ya cargado).`
-        : `Se importaron ${res.imported} movimientos. Sin duplicados detectados.`;
-      alert(msg);
+      setLastImportMsg({
+        tone: res.duplicates > 0 ? "warn" : "ok",
+        text: res.duplicates > 0
+          ? `Se importaron ${res.imported} movimientos. Se descartaron ${res.duplicates} por ser duplicados (misma fecha, monto, descripción y cuenta que uno ya cargado).`
+          : `Se importaron ${res.imported} movimientos. Sin duplicados detectados.`,
+      });
     } else {
-      alert(`Se importaron ${res} movimientos.`);
+      setLastImportMsg({ tone: "ok", text: `Se importaron ${res} movimientos.` });
     }
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {lastImportMsg && (
+        <div style={{
+          background: lastImportMsg.tone === "warn" ? "#fbf1de" : "#e8f3ec",
+          border: `1px solid ${lastImportMsg.tone === "warn" ? GOLD : GREEN}`,
+          borderRadius: 8, padding: "12px 14px", fontSize: 13, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center",
+        }}>
+          <span>{lastImportMsg.text}</span>
+          <button onClick={() => setLastImportMsg(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#8a9698" }}>
+            <X size={15} />
+          </button>
+        </div>
+      )}
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Importar movimientos</div>
         <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 12 }}>
