@@ -266,17 +266,8 @@ export default function FinanzasApp() {
         <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 380, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
           <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 24 }}>Finanzas compartidas. Decinos quién sos para empezar.</div>
-          {config.names.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
-              {config.names.map((n) => (
-                <button key={n} onClick={() => chooseName(n)} style={btnOutline}>
-                  <User size={16} /> Soy {n}
-                </button>
-              ))}
-            </div>
-          )}
           <div style={{ fontSize: 12, color: "#8a8f5c", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
-            {config.names.length > 0 ? "O ingresá otro nombre" : "Tu nombre"}
+            Tu nombre
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <input
