@@ -266,8 +266,17 @@ export default function FinanzasApp() {
         <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 380, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
           <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 24 }}>Finanzas compartidas. Decinos quién sos para empezar.</div>
+          {config.names.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+              {config.names.map((n) => (
+                <button key={n} onClick={() => chooseName(n)} style={btnOutline}>
+                  <User size={16} /> Soy {n}
+                </button>
+              ))}
+            </div>
+          )}
           <div style={{ fontSize: 12, color: "#8a8f5c", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
-            Tu nombre
+            {config.names.length > 0 ? "O ingresá otro nombre" : "Tu nombre"}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <input
@@ -792,7 +801,6 @@ function ImportarTab({ onImport }) {
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
   const [fileName, setFileName] = useState("");
-  const [lastImportMsg, setLastImportMsg] = useState(null);
 
   function handleFile(e) {
     const file = e.target.files?.[0];
@@ -818,31 +826,17 @@ function ImportarTab({ onImport }) {
     setText("");
     setResult(null);
     if (res && typeof res === "object") {
-      setLastImportMsg({
-        tone: res.duplicates > 0 ? "warn" : "ok",
-        text: res.duplicates > 0
-          ? `Se importaron ${res.imported} movimientos. Se descartaron ${res.duplicates} por ser duplicados (misma fecha, monto, descripción y cuenta que uno ya cargado).`
-          : `Se importaron ${res.imported} movimientos. Sin duplicados detectados.`,
-      });
+      const msg = res.duplicates > 0
+        ? `Se importaron ${res.imported} movimientos. Se descartaron ${res.duplicates} por ser duplicados (misma fecha, monto, descripción y cuenta que uno ya cargado).`
+        : `Se importaron ${res.imported} movimientos. Sin duplicados detectados.`;
+      alert(msg);
     } else {
-      setLastImportMsg({ tone: "ok", text: `Se importaron ${res} movimientos.` });
+      alert(`Se importaron ${res} movimientos.`);
     }
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {lastImportMsg && (
-        <div style={{
-          background: lastImportMsg.tone === "warn" ? "#fbf1de" : "#e8f3ec",
-          border: `1px solid ${lastImportMsg.tone === "warn" ? GOLD : GREEN}`,
-          borderRadius: 8, padding: "12px 14px", fontSize: 13, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center",
-        }}>
-          <span>{lastImportMsg.text}</span>
-          <button onClick={() => setLastImportMsg(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#8a9698" }}>
-            <X size={15} />
-          </button>
-        </div>
-      )}
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Importar movimientos</div>
         <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 12 }}>
