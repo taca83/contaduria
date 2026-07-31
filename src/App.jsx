@@ -23,6 +23,10 @@ const PAPER_DIM = "#EFEBE2";
 
 const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7CB1", "#C97B3D", "#8A8F5C", "#9C6B9E"];
 
+// Subí este número cada vez que Claude te entregue un archivo nuevo.
+// Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
+const APP_VERSION = "v5 · 2026-07-31 · cambios USD cuentan como ingreso (ARQ vs externos)";
+
 function fmtARS(n) {
   const v = Number(n) || 0;
   return v.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
@@ -205,7 +209,7 @@ export default function FinanzasApp() {
   );
   const totalIngresos = useMemo(
     () => thisMonthEntries
-      .filter((e) => e.type === "ingreso" || (e.type === "cambio" && e.account === "ARQ"))
+      .filter((e) => e.type === "ingreso" || e.type === "cambio")
       .reduce((s, e) => s + Number(e.amount), 0),
     [thisMonthEntries]
   );
@@ -232,7 +236,15 @@ export default function FinanzasApp() {
     if (cambios.length === 0) return null;
     const totalUsd = cambios.reduce((s, e) => s + Number(e.usdAmount), 0);
     const totalArs = cambios.reduce((s, e) => s + Number(e.amount), 0);
-    return { ultimo: cambios[0], promedio: totalArs / totalUsd, totalUsd, totalArs };
+    const esArq = (e) => (e.account || "").trim().toUpperCase() === "ARQ";
+    const arq = cambios.filter(esArq);
+    const externos = cambios.filter((e) => !esArq(e));
+    const sum = (arr, key) => arr.reduce((s, e) => s + Number(e[key]), 0);
+    return {
+      ultimo: cambios[0], promedio: totalArs / totalUsd, totalUsd, totalArs,
+      arq: { totalUsd: sum(arq, "usdAmount"), totalArs: sum(arq, "amount"), count: arq.length },
+      externos: { totalUsd: sum(externos, "usdAmount"), totalArs: sum(externos, "amount"), count: externos.length },
+    };
   }, [cambios]);
 
   const gastosPorCategoria = useMemo(() => {
@@ -266,17 +278,8 @@ export default function FinanzasApp() {
         <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 380, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
           <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 24 }}>Finanzas compartidas. Decinos quién sos para empezar.</div>
-          {config.names.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
-              {config.names.map((n) => (
-                <button key={n} onClick={() => chooseName(n)} style={btnOutline}>
-                  <User size={16} /> Soy {n}
-                </button>
-              ))}
-            </div>
-          )}
           <div style={{ fontSize: 12, color: "#8a8f5c", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
-            {config.names.length > 0 ? "O ingresá otro nombre" : "Tu nombre"}
+            Tu nombre
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <input
@@ -288,6 +291,7 @@ export default function FinanzasApp() {
             />
             <button onClick={() => chooseName(nameInput)} style={btnPrimary}>Entrar</button>
           </div>
+          <div style={{ fontSize: 10, color: "#c4bda8", marginTop: 18, textAlign: "right" }}>{APP_VERSION}</div>
         </div>
       </div>
     );
@@ -313,6 +317,7 @@ export default function FinanzasApp() {
             <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2 }}>
               Hola, {profileName} · {now.toLocaleDateString("es-AR", { month: "long", year: "numeric" })}
             </div>
+            <div style={{ fontSize: 9.5, color: "#5f7376", marginTop: 6 }}>{APP_VERSION}</div>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             {config.names.map((n) => (
@@ -495,7 +500,7 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, cambi
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const key = d.toISOString().slice(0, 7);
       const label = d.toLocaleDateString("es-AR", { month: "short", year: mesesAMostrar > 12 ? "2-digit" : undefined });
-      const ing = entries.filter((e) => (e.type === "ingreso" || (e.type === "cambio" && e.account === "ARQ")) && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
+      const ing = entries.filter((e) => (e.type === "ingreso" || e.type === "cambio") && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
       const gas = entries.filter((e) => e.type === "gasto" && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
       months.push({ mes: label, Ingresos: ing, Gastos: gas });
     }
@@ -519,6 +524,20 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, cambi
           <div>
             <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>USD cambiados en total</div>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>USD {cambiosStats.totalUsd.toLocaleString("es-AR")}</div>
+          </div>
+          <div style={{ width: "100%", display: "flex", gap: 20, flexWrap: "wrap", paddingTop: 12, marginTop: 4, borderTop: "1px solid #f0ece0" }}>
+            <div>
+              <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios ARQ (sueldo)</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GREEN }}>
+                USD {cambiosStats.arq.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.arq.totalArs)}
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios externos (cueva/change)</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GOLD }}>
+                USD {cambiosStats.externos.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.externos.totalArs)}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -801,6 +820,7 @@ function ImportarTab({ onImport }) {
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
   const [fileName, setFileName] = useState("");
+  const [lastImportMsg, setLastImportMsg] = useState(null);
 
   function handleFile(e) {
     const file = e.target.files?.[0];
@@ -826,17 +846,31 @@ function ImportarTab({ onImport }) {
     setText("");
     setResult(null);
     if (res && typeof res === "object") {
-      const msg = res.duplicates > 0
-        ? `Se importaron ${res.imported} movimientos. Se descartaron ${res.duplicates} por ser duplicados (misma fecha, monto, descripción y cuenta que uno ya cargado).`
-        : `Se importaron ${res.imported} movimientos. Sin duplicados detectados.`;
-      alert(msg);
+      setLastImportMsg({
+        tone: res.duplicates > 0 ? "warn" : "ok",
+        text: res.duplicates > 0
+          ? `Se importaron ${res.imported} movimientos. Se descartaron ${res.duplicates} por ser duplicados (misma fecha, monto, descripción y cuenta que uno ya cargado).`
+          : `Se importaron ${res.imported} movimientos. Sin duplicados detectados.`,
+      });
     } else {
-      alert(`Se importaron ${res} movimientos.`);
+      setLastImportMsg({ tone: "ok", text: `Se importaron ${res} movimientos.` });
     }
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {lastImportMsg && (
+        <div style={{
+          background: lastImportMsg.tone === "warn" ? "#fbf1de" : "#e8f3ec",
+          border: `1px solid ${lastImportMsg.tone === "warn" ? GOLD : GREEN}`,
+          borderRadius: 8, padding: "12px 14px", fontSize: 13, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center",
+        }}>
+          <span>{lastImportMsg.text}</span>
+          <button onClick={() => setLastImportMsg(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#8a9698" }}>
+            <X size={15} />
+          </button>
+        </div>
+      )}
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Importar movimientos</div>
         <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 12 }}>
@@ -1066,6 +1100,11 @@ function EntryForm({ onClose, onSave, saving }) {
             {arsFromCambio > 0 && (
               <div style={{ fontSize: 13, color: TEAL, fontWeight: 700, marginBottom: 14 }}>= {fmtARS(arsFromCambio)}</div>
             )}
+            <label style={labelStyle}>Cuenta / origen</label>
+            <input value={account} onChange={(e) => setAccount(e.target.value)} placeholder="Ej: ARQ, Cueva, Change" style={{ ...inputStyle, marginBottom: 14 }} />
+            <div style={{ fontSize: 11.5, color: "#8a9698", marginBottom: 14, marginTop: -8 }}>
+              "ARQ" se muestra como sueldo; cualquier otro nombre queda marcado como cambio externo (igual suma a Ingresos).
+            </div>
           </>
         ) : (
           <>
