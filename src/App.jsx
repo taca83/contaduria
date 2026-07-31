@@ -25,7 +25,7 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-const APP_VERSION = "v5 · 2026-07-31 · cambios USD cuentan como ingreso (ARQ vs externos)";
+const APP_VERSION = "v6 · 2026-07-31 · gastos en USD (alquiler Hebraica prorrateado)";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -75,6 +75,7 @@ function entryFromDb(row) {
     who: row.who || "",
     usdAmount: row.usd_amount != null ? Number(row.usd_amount) : undefined,
     rate: row.rate != null ? Number(row.rate) : undefined,
+    moneda: row.moneda || "ARS",
   };
 }
 // Mapea un entry de la app al shape de la tabla `entries` (Supabase)
@@ -90,6 +91,7 @@ function entryToDb(e) {
     who: e.who || "",
     usd_amount: e.usdAmount != null ? Number(e.usdAmount) : null,
     rate: e.rate != null ? Number(e.rate) : null,
+    moneda: e.moneda || "ARS",
   };
 }
 
@@ -214,7 +216,11 @@ export default function FinanzasApp() {
     [thisMonthEntries]
   );
   const totalGastos = useMemo(
-    () => thisMonthEntries.filter((e) => e.type === "gasto").reduce((s, e) => s + Number(e.amount), 0),
+    () => thisMonthEntries.filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS").reduce((s, e) => s + Number(e.amount), 0),
+    [thisMonthEntries]
+  );
+  const totalGastosUsd = useMemo(
+    () => thisMonthEntries.filter((e) => e.type === "gasto" && e.moneda === "USD").reduce((s, e) => s + Number(e.amount), 0),
     [thisMonthEntries]
   );
   const totalAhorro = useMemo(
@@ -249,7 +255,7 @@ export default function FinanzasApp() {
 
   const gastosPorCategoria = useMemo(() => {
     const map = {};
-    thisMonthEntries.filter((e) => e.type === "gasto").forEach((e) => {
+    thisMonthEntries.filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS").forEach((e) => {
       map[e.category] = (map[e.category] || 0) + Number(e.amount);
     });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
@@ -386,6 +392,7 @@ export default function FinanzasApp() {
               totalAhorradoHistorico={totalAhorradoHistorico}
               entries={entries}
               cambiosStats={cambiosStats}
+              totalGastosUsd={totalGastosUsd}
             />
           )}
           {tab === "movimientos" && (
@@ -482,7 +489,7 @@ function EmptyState({ text }) {
   );
 }
 
-function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, cambiosStats }) {
+function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, cambiosStats, totalGastosUsd }) {
   const [rango, setRango] = useState(6);
 
   const chartData = useMemo(() => {
@@ -542,7 +549,12 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, cambi
         </div>
       )}
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
-        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Gastos por categoría (este mes)</div>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Gastos por categoría (este mes)</div>
+        {totalGastosUsd > 0 && (
+          <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 12 }}>
+            + <b style={{ color: BRICK, fontFamily: "'IBM Plex Mono', monospace" }}>USD {totalGastosUsd.toLocaleString("es-AR", { maximumFractionDigits: 2 })}</b> en gastos cargados directo en dólares (no incluidos en el total de pesos de arriba).
+          </div>
+        )}
         {gastosPorCategoria.length === 0 ? <EmptyState text="Todavía no cargaste gastos este mes." /> : (
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <div style={{ width: 180, height: 180 }}>
@@ -1052,6 +1064,7 @@ function EntryForm({ onClose, onSave, saving }) {
   const [usdAmount, setUsdAmount] = useState("");
   const [rate, setRate] = useState("");
   const [account, setAccount] = useState("");
+  const [moneda, setMoneda] = useState("ARS");
 
   const cats = type === "gasto" ? GASTO_CATS : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR;
   const arsFromCambio = (Number(usdAmount) || 0) * (Number(rate) || 0);
@@ -1070,7 +1083,7 @@ function EntryForm({ onClose, onSave, saving }) {
       return;
     }
     if (!amount || Number(amount) <= 0) return;
-    onSave({ type, amount: Number(amount), category, desc, date, account });
+    onSave({ type, amount: Number(amount), category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS" });
   }
 
   return (
@@ -1108,7 +1121,21 @@ function EntryForm({ onClose, onSave, saving }) {
           </>
         ) : (
           <>
-            <label style={labelStyle}>Monto (ARS)</label>
+            {(type === "gasto" || type === "ingreso") && (
+              <>
+                <label style={labelStyle}>Moneda</label>
+                <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+                  {["ARS", "USD"].map((m) => (
+                    <button key={m} onClick={() => setMoneda(m)} style={{
+                      flex: 1, padding: "8px 6px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                      border: `1.5px solid ${moneda === m ? TEAL : "#ddd6c4"}`,
+                      background: moneda === m ? TEAL : "#fff", color: moneda === m ? "#fff" : INK,
+                    }}>{m}</button>
+                  ))}
+                </div>
+              </>
+            )}
+            <label style={labelStyle}>Monto ({moneda === "USD" ? "USD" : "ARS"})</label>
             <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 14, fontSize: 20, fontFamily: "'IBM Plex Mono', monospace" }} autoFocus />
 
             <label style={labelStyle}>{type === "ahorro" ? "Instrumento" : "Categoría"}</label>
@@ -1118,6 +1145,11 @@ function EntryForm({ onClose, onSave, saving }) {
 
             <label style={labelStyle}>Tarjeta / cuenta (opcional)</label>
             <input value={account} onChange={(e) => setAccount(e.target.value)} placeholder="Ej: Visa BBVA Hernán" style={{ ...inputStyle, marginBottom: 14 }} />
+            {moneda === "USD" && (type === "gasto" || type === "ingreso") && (
+              <div style={{ fontSize: 11.5, color: "#8a9698", marginTop: -8, marginBottom: 14 }}>
+                Este movimiento queda en dólares y no se mezcla con los totales en pesos.
+              </div>
+            )}
           </>
         )}
 
