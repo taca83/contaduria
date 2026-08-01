@@ -42,7 +42,7 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-const APP_VERSION = "v21 · 2026-07-31 · categorías nuevas + recategorización que se aprende";
+const APP_VERSION = "v22 · 2026-07-31 · elegir alcance de búsqueda: mes o todo el historial";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1046,9 +1046,11 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
 function MovimientosTab({ entries, allEntries, onDelete, profileName, monthLabel }) {
   const [filter, setFilter] = useState("todos");
   const [busq, setBusq] = useState("");
+  const [alcance, setAlcance] = useState("mes"); // "mes" | "historial"
   const buscando = busq.trim().length > 0;
+  const usaTodo = alcance === "historial";
 
-  const base = buscando ? allEntries : entries;
+  const base = usaTodo ? allEntries : entries;
   const filtered = base.filter((e) => {
     const pasaTipo = filter === "todos" ? (e.type === "gasto" || e.type === "ingreso") : e.type === filter;
     if (!pasaTipo) return false;
@@ -1060,13 +1062,13 @@ function MovimientosTab({ entries, allEntries, onDelete, profileName, monthLabel
       e.account?.toLowerCase().includes(q) ||
       e.who?.toLowerCase().includes(q)
     );
-  }).sort((a, b) => (buscando ? (b.date || "").localeCompare(a.date || "") : 0));
+  }).sort((a, b) => (usaTodo ? (b.date || "").localeCompare(a.date || "") : 0));
 
   return (
     <div>
       {monthLabel && (
         <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 10, textTransform: "capitalize" }}>
-          {buscando ? <>Buscando en <b>todo el historial</b></> : <>Mostrando: <b>{monthLabel}</b></>}
+          {usaTodo ? <>Mostrando <b>todo el historial</b></> : <>Mostrando: <b>{monthLabel}</b></>}
         </div>
       )}
       <input
@@ -1075,6 +1077,15 @@ function MovimientosTab({ entries, allEntries, onDelete, profileName, monthLabel
         placeholder="Buscar por descripción, categoría, cuenta o quién lo cargó..."
         style={{ ...inputStyle, marginBottom: 10 }}
       />
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {[["mes", "Buscar en el mes"], ["historial", "Buscar en todo el historial"]].map(([k, l]) => (
+          <button key={k} onClick={() => setAlcance(k)} style={{
+            padding: "6px 12px", borderRadius: 20, fontSize: 12, cursor: "pointer",
+            border: `1px solid ${alcance === k ? GOLD : "#ddd6c4"}`,
+            background: alcance === k ? GOLD : "#fff", color: alcance === k ? "#fff" : INK, fontWeight: 600
+          }}>{l}</button>
+        ))}
+      </div>
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
         {[["todos", "Todos"], ["gasto", "Gastos"], ["ingreso", "Ingresos"], ["cambio", "Cambios USD"]].map(([k, l]) => (
           <button key={k} onClick={() => setFilter(k)} style={{
