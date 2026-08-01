@@ -10,7 +10,7 @@ import {
   Home, List, Upload
 } from "lucide-react";
 
-const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Ocio", "Educación", "Ropa", "Otros"];
+const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Educación", "Ocio", "Cumpleaños", "Auto Citroen", "Auto DS", "Ropa", "Otros"];
 const TAB_LABELS = {
   resumen: "Resumen",
   movimientos: "Movimientos",
@@ -42,7 +42,7 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-const APP_VERSION = "v20 · 2026-07-31 · botones grandes (Resumen/Movimientos/Presupuestos/Importar) + menú chico arriba a la derecha";
+const APP_VERSION = "v21 · 2026-07-31 · categorías nuevas + recategorización que se aprende";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -68,7 +68,21 @@ const CATEGORY_RULES = [
     "NANQUE", "ROYAL VENDING", "SUPER TESCO", "MASTER",
   ]],
 ];
-function inferCategory(desc) {
+// Clave normalizada para "aprender" categorías por descripción exacta:
+// mayúsculas, sin espacios de más, y sin el sufijo de cuota (para que
+// "MERPAGO*ADIDAS (cuota 3/6)" y "MERPAGO*ADIDAS (cuota 4/6)" cuenten
+// como la misma descripción de fondo.
+function descKey(desc) {
+  return (desc || "")
+    .toUpperCase()
+    .replace(/\s*\(CUOTA[^)]*\)\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferCategory(desc, overrides = {}) {
+  const key = descKey(desc);
+  if (overrides[key]) return overrides[key];
   const d = (desc || "").toUpperCase();
   for (const [cat, keywords] of CATEGORY_RULES) {
     if (keywords.some((k) => (k instanceof RegExp ? k.test(d) : d.includes(k)))) return cat;
@@ -125,7 +139,7 @@ async function extraerLineasPdf(file) {
 }
 
 // Parser específico del formato de resumen BBVA (Visa Signature / Mastercard Black)
-function parsearResumenBBVA(lineas, nombreArchivo) {
+function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   const filas = [];
   const avisos = [];
 
@@ -158,7 +172,7 @@ function parsearResumenBBVA(lineas, nombreArchivo) {
     filas.push({
       date: fecha,
       type: "gasto",
-      category: inferCategory(desc),
+      category: inferCategory(desc, overrides),
       amount: monto,
       desc: seccionActual === "Natalia Wajsman" ? `${desc} (Natalia)` : desc,
       account: cuenta,
@@ -186,7 +200,7 @@ async function extraerTextoPdf(file) {
 
 // Parser del resumen de Mercado Pago (movimientos en pesos).
 // Ignora todo lo que aparezca después de "RESUMEN DE TENENCIAS EN DÓLARES".
-function parsearResumenMercadoPago(fullText) {
+function parsearResumenMercadoPago(fullText, overrides = {}) {
   const filas = [];
   const avisos = [];
   const seccionPesos = fullText.split(/RESUMEN DE TENENCIAS EN D[ÓO]LARES/i)[0];
@@ -217,7 +231,7 @@ function parsearResumenMercadoPago(fullText) {
       category = valor < 0 ? "Otro" : "Otros ingresos";
     } else if (valor < 0) {
       type = "gasto";
-      category = inferCategory(desc);
+      category = inferCategory(desc, overrides);
     } else {
       type = "ingreso";
       category = "Otros ingresos";
@@ -331,11 +345,13 @@ function mockLoad() {
     entries: safeGet("mock_entries") || [],
     budgets: safeGet("mock_budgets") || {},
     names: safeGet("mock_names") || [],
+    overrides: safeGet("mock_overrides") || {},
   };
 }
 function mockSaveEntries(entries) { safeSet("mock_entries", entries); }
 function mockSaveBudgets(budgets) { safeSet("mock_budgets", budgets); }
 function mockSaveNames(names) { safeSet("mock_names", names); }
+function mockSaveOverrides(overrides) { safeSet("mock_overrides", overrides); }
 
 export default function FinanzasApp() {
   const [loading, setLoading] = useState(true);
@@ -344,6 +360,7 @@ export default function FinanzasApp() {
   const [config, setConfig] = useState({ names: [] });
   const [entries, setEntries] = useState([]);
   const [budgets, setBudgets] = useState({});
+  const [categoryOverrides, setCategoryOverrides] = useState({});
   const [tab, setTab] = useState("resumen");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -361,20 +378,25 @@ export default function FinanzasApp() {
         setConfig({ names: mock.names });
         setEntries(mock.entries);
         setBudgets(mock.budgets);
+        setCategoryOverrides(mock.overrides);
         setLoading(false);
         return;
       }
       try {
-        const [cfgRows, entRows, budRows] = await Promise.all([
+        const [cfgRows, entRows, budRows, ovrRows] = await Promise.all([
           sb("config?id=eq.1&select=names"),
           sb("entries?select=*&order=date.desc"),
           sb("budgets?select=*"),
+          sb("category_overrides?select=*"),
         ]);
         setConfig({ names: cfgRows?.[0]?.names || [] });
         setEntries((entRows || []).map(entryFromDb));
         const budObj = {};
         (budRows || []).forEach((b) => { budObj[b.category] = Number(b.limit_amount); });
         setBudgets(budObj);
+        const ovrObj = {};
+        (ovrRows || []).forEach((o) => { ovrObj[o.desc_key] = o.category; });
+        setCategoryOverrides(ovrObj);
       } catch (e) {
         console.error(e);
         setLoadError(`No se pudo conectar con la base de datos.\n\nDetalle técnico: ${e.message}`);
@@ -721,6 +743,7 @@ export default function FinanzasApp() {
           )}
           {tab === "importar" && (
             <ImportarTab
+              categoryOverrides={categoryOverrides}
               onImport={async (rows) => {
                 const sig = (e) => `${e.date}|${Number(e.amount)}|${(e.desc || "").trim().toLowerCase()}|${(e.account || "").trim().toLowerCase()}`;
                 const existentes = new Set(entries.map(sig));
@@ -753,17 +776,41 @@ export default function FinanzasApp() {
               entries={entries}
               onApply={async (ids, nuevaCategoria) => {
                 const idSet = new Set(ids);
-                const next = entries.map((e) => idSet.has(e.id) ? { ...e, category: nuevaCategoria } : e);
+                const seleccionadas = entries.filter((e) => idSet.has(e.id));
+                const keysAfectadas = new Set(seleccionadas.map((e) => descKey(e.desc)));
+
+                // Además de lo elegido, cualquier otro movimiento ya cargado
+                // con la misma descripción (aunque no estuviera visible en
+                // este momento) se actualiza también.
+                const idsAfectados = new Set(ids);
+                entries.forEach((e) => {
+                  if (keysAfectadas.has(descKey(e.desc))) idsAfectados.add(e.id);
+                });
+
+                const next = entries.map((e) => idsAfectados.has(e.id) ? { ...e, category: nuevaCategoria } : e);
                 setEntries(next);
-                if (!HAS_SUPABASE) { mockSaveEntries(next); return; }
+
+                const nuevosOverrides = { ...categoryOverrides };
+                keysAfectadas.forEach((k) => { if (k) nuevosOverrides[k] = nuevaCategoria; });
+                setCategoryOverrides(nuevosOverrides);
+
+                if (!HAS_SUPABASE) {
+                  mockSaveEntries(next);
+                  mockSaveOverrides(nuevosOverrides);
+                  return;
+                }
                 await Promise.all(
-                  ids.map((id) =>
+                  [...idsAfectados].map((id) =>
                     sb(`entries?id=eq.${encodeURIComponent(id)}`, {
                       method: "PATCH",
                       body: JSON.stringify({ category: nuevaCategoria }),
                     })
                   )
                 );
+                const rows = [...keysAfectadas].filter(Boolean).map((k) => ({ desc_key: k, category: nuevaCategoria }));
+                if (rows.length > 0) {
+                  await sb("category_overrides", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
+                }
               }}
             />
           )}
@@ -1203,7 +1250,7 @@ function parseCSV(text) {
   return { rows, errors };
 }
 
-function ImportarTab({ onImport }) {
+function ImportarTab({ onImport, categoryOverrides }) {
   const [text, setText] = useState("");
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -1224,7 +1271,7 @@ function ImportarTab({ onImport }) {
     for (const file of files) {
       try {
         const lineas = await extraerLineasPdf(file);
-        const { filas, avisos: av } = parsearResumenBBVA(lineas, file.name);
+        const { filas, avisos: av } = parsearResumenBBVA(lineas, file.name, categoryOverrides);
         if (filas.length === 0) {
           avisos.push(`${file.name}: no reconocí movimientos con el formato BBVA. Puede ser otro banco/billetera — pasámelo a mí directamente en el chat para procesarlo.`);
         }
@@ -1250,7 +1297,7 @@ function ImportarTab({ onImport }) {
     for (const file of files) {
       try {
         const texto = await extraerTextoPdf(file);
-        const { filas, avisos: av } = parsearResumenMercadoPago(texto);
+        const { filas, avisos: av } = parsearResumenMercadoPago(texto, categoryOverrides);
         if (filas.length === 0) {
           avisos.push(`${file.name}: no reconocí movimientos con el formato de Mercado Pago. Pasámelo a mí en el chat para revisarlo.`);
         }
