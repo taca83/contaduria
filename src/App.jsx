@@ -44,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v32 · 2026-07-31 · worker de PDF servido como archivo estático propio (/pdf.worker.min.mjs)
-const APP_VERSION = "v32 · 2026-07-31";
+// v33 · 2026-07-31 · pdfjs-dist build "legacy" para compatibilidad con navegadores viejos
+const APP_VERSION = "v33 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -109,10 +109,10 @@ function fechaBbvaAIso(d, mmm, yy) {
 let _pdfjsLibCache = null;
 async function cargarPdfjs() {
   if (_pdfjsLibCache) return _pdfjsLibCache;
-  const pdfjsLib = await import("pdfjs-dist");
-  // El worker se sirve como archivo estático propio (public/pdf.worker.min.mjs),
-  // no desde un CDN ni armado dinámicamente — evita todos los problemas de
-  // CORS/bloqueo silencioso/tipo de módulo que dieron los otros enfoques.
+  // Usamos el build "legacy" de pdfjs-dist, pensado para navegadores que
+  // no soportan bien todas las características modernas que usa el build
+  // estándar (esto suele arreglar fallas puntuales en Safari/iOS).
+  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
   pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
   _pdfjsLibCache = pdfjsLib;
   return pdfjsLib;
