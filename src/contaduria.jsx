@@ -44,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v33 · 2026-07-31 · pdfjs-dist build "legacy" para compatibilidad con navegadores viejos
-const APP_VERSION = "v33 · 2026-07-31";
+// v34 · 2026-07-31 · pdfjs-dist fijado en v3.11.174 (fix bug de iOS/Safari)
+const APP_VERSION = "v34 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -109,12 +109,10 @@ function fechaBbvaAIso(d, mmm, yy) {
 let _pdfjsLibCache = null;
 async function cargarPdfjs() {
   if (_pdfjsLibCache) return _pdfjsLibCache;
-  // Usamos el build "legacy" de pdfjs-dist, pensado para navegadores que
-  // no soportan bien todas las características modernas que usa el build
-  // estándar (esto suele arreglar fallas puntuales en Safari/iOS).
-  // Nota: pdfjs-dist quedó fijado en 3.11.174 (ver mozilla/pdf.js#20479),
-  // versión anterior a que el paquete pasara a ser ESM-only, así que acá
-  // el archivo es "pdf.js" y no "pdf.mjs" como en versiones más nuevas.
+  // Build "legacy" de pdfjs-dist, fijado en la versión 3.11.174 (más
+  // estable en Safari/iOS que las versiones recientes — ver
+  // mozilla/pdf.js#20479). Esta versión predata el pasaje a ESM-only,
+  // por eso el archivo es .js y no .mjs.
   const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.js");
   pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
   _pdfjsLibCache = pdfjsLib;
