@@ -44,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v27 · 2026-07-31 · categoría Comunicaciones + log de importaciones en Historial
-const APP_VERSION = "v27 · 2026-07-31";
+// v29 · 2026-07-31 · lista de movimientos de cambio en Divisas
+const APP_VERSION = "v29 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -779,53 +779,68 @@ export default function FinanzasApp() {
       </div>
 
       <div style={{ maxWidth: 720, margin: "0 auto", padding: "0 16px" }}>
-        {/* Balance ticket */}
-        <div style={{
-          background: "#fff", marginTop: -18, borderRadius: 10, padding: "20px 18px",
-          boxShadow: "0 8px 24px rgba(27,42,46,0.12)", position: "relative"
-        }}>
-          <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#8a9698", marginBottom: 4 }}>Balance del mes</div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 32, fontWeight: 600, color: balance >= 0 ? GREEN : BRICK }}>
-            {fmtARS(balance)}
-          </div>
-          <div style={{ display: "flex", gap: 18, marginTop: 14, borderTop: `1px dashed #d8d3c6`, paddingTop: 14, flexWrap: "wrap" }}>
-            <Stat icon={<ArrowUpRight size={14} color={GREEN} />} label="Ingresos" value={fmtARS(totalIngresos)} />
-            <Stat icon={<ArrowDownRight size={14} color={BRICK} />} label="Gastos" value={fmtARS(totalGastos)} />
-            <Stat icon={<PiggyBank size={14} color={GOLD} />} label="Ahorrado" value={fmtARS(totalAhorro)} />
-          </div>
-        </div>
-
-        {/* Secciones principales */}
-        <div style={{ marginTop: 22 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-            {PRIMARY_TABS.map(([key, label, Icon]) => (
-              <button
-                key={key}
-                onClick={() => setTab(key)}
-                style={{
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-                  padding: "14px 6px", borderRadius: 10, cursor: "pointer",
-                  border: `1.5px solid ${tab === key ? TEAL : "#ddd6c4"}`,
-                  background: tab === key ? TEAL : "#fff",
-                  color: tab === key ? "#fff" : INK,
-                  boxShadow: tab === key ? "0 4px 14px rgba(15,110,110,0.25)" : "0 1px 4px rgba(27,42,46,0.06)",
-                }}
-              >
-                <Icon size={20} />
-                <span style={{ fontSize: 11.5, fontWeight: 700, textAlign: "center", lineHeight: 1.1 }}>{label}</span>
-              </button>
-            ))}
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+        {SECONDARY_TABS.includes(tab) ? (
+          <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 10 }}>
             <button
-              onClick={exportarExcel}
-              title="Exportar todos los movimientos a Excel"
-              style={{ ...btnOutline, padding: "8px 12px", fontSize: 12.5 }}
+              onClick={() => setTab("resumen")}
+              style={{ ...btnOutline, padding: "8px 10px" }}
+              aria-label="Volver al Resumen"
             >
-              <Download size={15} /> Excel
+              ← Volver
             </button>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>{TAB_LABELS[tab]}</div>
           </div>
-        </div>
+        ) : (
+          <>
+            {/* Balance ticket */}
+            <div style={{
+              background: "#fff", marginTop: -18, borderRadius: 10, padding: "20px 18px",
+              boxShadow: "0 8px 24px rgba(27,42,46,0.12)", position: "relative"
+            }}>
+              <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#8a9698", marginBottom: 4 }}>Balance del mes</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 32, fontWeight: 600, color: balance >= 0 ? GREEN : BRICK }}>
+                {fmtARS(balance)}
+              </div>
+              <div style={{ display: "flex", gap: 18, marginTop: 14, borderTop: `1px dashed #d8d3c6`, paddingTop: 14, flexWrap: "wrap" }}>
+                <Stat icon={<ArrowUpRight size={14} color={GREEN} />} label="Ingresos" value={fmtARS(totalIngresos)} />
+                <Stat icon={<ArrowDownRight size={14} color={BRICK} />} label="Gastos" value={fmtARS(totalGastos)} />
+                <Stat icon={<PiggyBank size={14} color={GOLD} />} label="Ahorrado" value={fmtARS(totalAhorro)} />
+              </div>
+            </div>
+
+            {/* Secciones principales */}
+            <div style={{ marginTop: 22 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+                {PRIMARY_TABS.map(([key, label, Icon]) => (
+                  <button
+                    key={key}
+                    onClick={() => setTab(key)}
+                    style={{
+                      display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+                      padding: "14px 6px", borderRadius: 10, cursor: "pointer",
+                      border: `1.5px solid ${tab === key ? TEAL : "#ddd6c4"}`,
+                      background: tab === key ? TEAL : "#fff",
+                      color: tab === key ? "#fff" : INK,
+                      boxShadow: tab === key ? "0 4px 14px rgba(15,110,110,0.25)" : "0 1px 4px rgba(27,42,46,0.06)",
+                    }}
+                  >
+                    <Icon size={20} />
+                    <span style={{ fontSize: 11.5, fontWeight: 700, textAlign: "center", lineHeight: 1.1 }}>{label}</span>
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+                <button
+                  onClick={exportarExcel}
+                  title="Exportar todos los movimientos a Excel"
+                  style={{ ...btnOutline, padding: "8px 12px", fontSize: 12.5 }}
+                >
+                  <Download size={15} /> Excel
+                </button>
+              </div>
+            </div>
+          </>
+        )}
 
         <div style={{ marginTop: 20 }}>
           {tab === "resumen" && (
@@ -884,7 +899,7 @@ export default function FinanzasApp() {
             <DuplicadosTab entries={entries} onDelete={deleteEntry} />
           )}
           {tab === "divisas" && (
-            <DivisasTab cambiosStats={cambiosStats} />
+            <DivisasTab cambiosStats={cambiosStats} cambios={cambios} onDelete={deleteEntry} />
           )}
           {tab === "historial" && (
             <HistorialTab />
@@ -974,7 +989,7 @@ function EmptyState({ text }) {
   );
 }
 
-function DivisasTab({ cambiosStats }) {
+function DivisasTab({ cambiosStats, cambios, onDelete }) {
   if (!cambiosStats) {
     return (
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
@@ -984,34 +999,68 @@ function DivisasTab({ cambiosStats }) {
     );
   }
   return (
-    <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)", display: "flex", gap: 20, flexWrap: "wrap" }}>
-      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, width: "100%", marginBottom: 4 }}>Divisas</div>
-      <div>
-        <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Último cambio</div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: TEAL, marginTop: 2 }}>
-          ${cambiosStats.ultimo.rate} <span style={{ fontSize: 11, color: "#9a9488", fontWeight: 400 }}>({cambiosStats.ultimo.date})</span>
-        </div>
-      </div>
-      <div>
-        <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Promedio histórico</div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>${cambiosStats.promedio.toFixed(0)}</div>
-      </div>
-      <div>
-        <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>USD cambiados en total</div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>USD {cambiosStats.totalUsd.toLocaleString("es-AR")}</div>
-      </div>
-      <div style={{ width: "100%", display: "flex", gap: 20, flexWrap: "wrap", paddingTop: 12, marginTop: 4, borderTop: "1px solid #f0ece0" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)", display: "flex", gap: 20, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, width: "100%", marginBottom: 4 }}>Divisas</div>
         <div>
-          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios ARQ (sueldo)</div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GREEN }}>
-            USD {cambiosStats.arq.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.arq.totalArs)}
+          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Último cambio</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: TEAL, marginTop: 2 }}>
+            ${cambiosStats.ultimo.rate} <span style={{ fontSize: 11, color: "#9a9488", fontWeight: 400 }}>({cambiosStats.ultimo.date})</span>
           </div>
         </div>
         <div>
-          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios externos (cueva/change)</div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GOLD }}>
-            USD {cambiosStats.externos.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.externos.totalArs)}
+          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Promedio histórico</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>${cambiosStats.promedio.toFixed(0)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>USD cambiados en total</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>USD {cambiosStats.totalUsd.toLocaleString("es-AR")}</div>
+        </div>
+        <div style={{ width: "100%", display: "flex", gap: 20, flexWrap: "wrap", paddingTop: 12, marginTop: 4, borderTop: "1px solid #f0ece0" }}>
+          <div>
+            <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios ARQ (sueldo)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GREEN }}>
+              USD {cambiosStats.arq.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.arq.totalArs)}
+            </div>
           </div>
+          <div>
+            <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios externos (cueva/change)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GOLD }}>
+              USD {cambiosStats.externos.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.externos.totalArs)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, marginBottom: 12 }}>Historial de cambios ({cambios.length})</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {cambios.map((e) => {
+            const esArq = (e.account || "").trim().toUpperCase() === "ARQ";
+            return (
+              <div key={e.id} style={{ background: PAPER_DIM, borderRadius: 8, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+                    USD {Number(e.usdAmount).toLocaleString("es-AR")} a ${e.rate}
+                    <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 700, padding: "2px 7px", borderRadius: 10, background: esArq ? "#e4f0e8" : "#fbf1de", color: esArq ? GREEN : GOLD }}>
+                      {esArq ? "ARQ (sueldo)" : (e.account || "externo")}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "#9a9488", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {e.date} · {e.who}{e.desc ? ` · ${e.desc}` : ""}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: TEAL }}>{fmtARS(e.amount)}</div>
+                  {onDelete && (
+                    <button onClick={() => onDelete(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4" }} aria-label="Borrar">
+                      <Trash2 size={15} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
