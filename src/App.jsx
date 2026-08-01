@@ -7,7 +7,7 @@ import {
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
   ArrowUpRight, ArrowDownRight, Landmark, Settings, Trash2, User, Download, Menu,
-  Home, List, Upload
+  Home, List, Upload, Pencil, Check
 } from "lucide-react";
 
 const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Educación", "Ocio", "Cumpleaños", "Auto Citroen", "Auto DS", "Ropa", "Otros"];
@@ -19,6 +19,7 @@ const TAB_LABELS = {
   importar: "Importar",
   duplicados: "Duplicados",
   recategorizar: "Recategorizar",
+  divisas: "Divisas",
 };
 const PRIMARY_TABS = [
   ["resumen", "Resumen", Home],
@@ -26,7 +27,7 @@ const PRIMARY_TABS = [
   ["presupuestos", "Presupuestos", Target],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["ahorros", "duplicados", "recategorizar"];
+const SECONDARY_TABS = ["ahorros", "duplicados", "recategorizar", "divisas"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -42,7 +43,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-const APP_VERSION = "v22 · 2026-07-31 · elegir alcance de búsqueda: mes o todo el historial";
+// v24 · 2026-07-31 · Divisas movida al menú chico, fuera del home
+const APP_VERSION = "v24 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -439,6 +441,16 @@ export default function FinanzasApp() {
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
+  async function editEntryDesc(id, nuevoDesc) {
+    setEntries((prev) => {
+      const next = prev.map((e) => e.id === id ? { ...e, desc: nuevoDesc } : e);
+      if (!HAS_SUPABASE) mockSaveEntries(next);
+      return next;
+    });
+    if (!HAS_SUPABASE) return;
+    await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ descripcion: nuevoDesc }) });
+  }
+
   async function updateBudgets(next) {
     setBudgets(next);
     if (!HAS_SUPABASE) { mockSaveBudgets(next); return; }
@@ -733,7 +745,7 @@ export default function FinanzasApp() {
             />
           )}
           {tab === "movimientos" && (
-            <MovimientosTab allEntries={entries} entries={thisMonthEntries} onDelete={deleteEntry} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
+            <MovimientosTab allEntries={entries} entries={thisMonthEntries} onDelete={deleteEntry} onEditDesc={editEntryDesc} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
           )}
           {tab === "ahorros" && (
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
@@ -770,6 +782,9 @@ export default function FinanzasApp() {
           )}
           {tab === "duplicados" && (
             <DuplicadosTab entries={entries} onDelete={deleteEntry} />
+          )}
+          {tab === "divisas" && (
+            <DivisasTab cambiosStats={cambiosStats} />
           )}
           {tab === "recategorizar" && (
             <RecategorizarTab
@@ -856,6 +871,50 @@ function EmptyState({ text }) {
   );
 }
 
+function DivisasTab({ cambiosStats }) {
+  if (!cambiosStats) {
+    return (
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Divisas</div>
+        <EmptyState text="Todavía no cargaste ningún cambio USD→ARS." />
+      </div>
+    );
+  }
+  return (
+    <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)", display: "flex", gap: 20, flexWrap: "wrap" }}>
+      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, width: "100%", marginBottom: 4 }}>Divisas</div>
+      <div>
+        <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Último cambio</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: TEAL, marginTop: 2 }}>
+          ${cambiosStats.ultimo.rate} <span style={{ fontSize: 11, color: "#9a9488", fontWeight: 400 }}>({cambiosStats.ultimo.date})</span>
+        </div>
+      </div>
+      <div>
+        <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Promedio histórico</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>${cambiosStats.promedio.toFixed(0)}</div>
+      </div>
+      <div>
+        <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>USD cambiados en total</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>USD {cambiosStats.totalUsd.toLocaleString("es-AR")}</div>
+      </div>
+      <div style={{ width: "100%", display: "flex", gap: 20, flexWrap: "wrap", paddingTop: 12, marginTop: 4, borderTop: "1px solid #f0ece0" }}>
+        <div>
+          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios ARQ (sueldo)</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GREEN }}>
+            USD {cambiosStats.arq.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.arq.totalArs)}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios externos (cueva/change)</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GOLD }}>
+            USD {cambiosStats.externos.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.externos.totalArs)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd }) {
   const [expandedCat, setExpandedCat] = useState(null);
   const [rango, setRango] = useState(6);
@@ -884,38 +943,6 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-      {cambiosStats && (
-        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)", display: "flex", gap: 20, flexWrap: "wrap" }}>
-          <div>
-            <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Último cambio</div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: TEAL, marginTop: 2 }}>
-              ${cambiosStats.ultimo.rate} <span style={{ fontSize: 11, color: "#9a9488", fontWeight: 400 }}>({cambiosStats.ultimo.date})</span>
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Promedio histórico</div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>${cambiosStats.promedio.toFixed(0)}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>USD cambiados en total</div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>USD {cambiosStats.totalUsd.toLocaleString("es-AR")}</div>
-          </div>
-          <div style={{ width: "100%", display: "flex", gap: 20, flexWrap: "wrap", paddingTop: 12, marginTop: 4, borderTop: "1px solid #f0ece0" }}>
-            <div>
-              <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios ARQ (sueldo)</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GREEN }}>
-                USD {cambiosStats.arq.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.arq.totalArs)}
-              </div>
-            </div>
-            <div>
-              <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios externos (cueva/change)</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GOLD }}>
-                USD {cambiosStats.externos.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.externos.totalArs)}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Gastos por categoría (este mes)</div>
         {totalGastosUsd > 0 && (
@@ -1043,10 +1070,26 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   );
 }
 
-function MovimientosTab({ entries, allEntries, onDelete, profileName, monthLabel }) {
+function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, profileName, monthLabel }) {
   const [filter, setFilter] = useState("todos");
   const [busq, setBusq] = useState("");
   const [alcance, setAlcance] = useState("mes"); // "mes" | "historial"
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState("");
+
+  function startEdit(e) {
+    setEditingId(e.id);
+    setEditText(e.desc || "");
+  }
+  function cancelEdit() {
+    setEditingId(null);
+    setEditText("");
+  }
+  async function saveEdit(id) {
+    await onEditDesc(id, editText.trim());
+    setEditingId(null);
+    setEditText("");
+  }
   const buscando = busq.trim().length > 0;
   const usaTodo = alcance === "historial";
 
@@ -1097,33 +1140,61 @@ function MovimientosTab({ entries, allEntries, onDelete, profileName, monthLabel
       </div>
       {filtered.length === 0 ? <EmptyState text="No hay movimientos para mostrar." /> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {filtered.map((e) => (
-            <div key={e.id} style={{ background: "#fff", borderRadius: 8, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 1px 4px rgba(27,42,46,0.06)" }}>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
-                <div style={{
-                  width: 34, height: 34, borderRadius: "50%", flexShrink: 0,
-                  background: e.type === "ingreso" ? "#e4f0e8" : e.type === "cambio" ? "#e3eeee" : "#f7e9e6",
-                  display: "flex", alignItems: "center", justifyContent: "center"
-                }}>
-                  {e.type === "ingreso" ? <TrendingUp size={16} color={GREEN} /> : e.type === "cambio" ? <Landmark size={16} color={TEAL} /> : <TrendingDown size={16} color={BRICK} />}
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.category}{e.desc ? ` · ${e.desc}` : ""}</div>
-                  <div style={{ fontSize: 11.5, color: "#9a9488" }}>
-                    {e.date} · {e.who}{e.account ? ` · ${e.account}` : ""}{e.type === "cambio" ? ` · USD ${e.usdAmount} a $${e.rate}` : ""}
+          {filtered.map((e) => {
+            const editing = editingId === e.id;
+            return (
+              <div key={e.id} style={{ background: "#fff", borderRadius: 8, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 1px 4px rgba(27,42,46,0.06)", gap: 10 }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, flex: 1 }}>
+                  <div style={{
+                    width: 34, height: 34, borderRadius: "50%", flexShrink: 0,
+                    background: e.type === "ingreso" ? "#e4f0e8" : e.type === "cambio" ? "#e3eeee" : "#f7e9e6",
+                    display: "flex", alignItems: "center", justifyContent: "center"
+                  }}>
+                    {e.type === "ingreso" ? <TrendingUp size={16} color={GREEN} /> : e.type === "cambio" ? <Landmark size={16} color={TEAL} /> : <TrendingDown size={16} color={BRICK} />}
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    {editing ? (
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input
+                          autoFocus
+                          value={editText}
+                          onChange={(ev) => setEditText(ev.target.value)}
+                          onKeyDown={(ev) => { if (ev.key === "Enter") saveEdit(e.id); if (ev.key === "Escape") cancelEdit(); }}
+                          style={{ ...inputStyle, padding: "5px 8px", fontSize: 13 }}
+                        />
+                        <button onClick={() => saveEdit(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: GREEN, flexShrink: 0 }} aria-label="Guardar">
+                          <Check size={16} />
+                        </button>
+                        <button onClick={cancelEdit} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4", flexShrink: 0 }} aria-label="Cancelar">
+                          <X size={16} />
+                        </button>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.category}{e.desc ? ` · ${e.desc}` : ""}</div>
+                        {e.type !== "cambio" && (
+                          <button onClick={() => startEdit(e)} style={{ border: "none", background: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }} aria-label="Editar descripción">
+                            <Pencil size={13} />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11.5, color: "#9a9488" }}>
+                      {e.date} · {e.who}{e.account ? ` · ${e.account}` : ""}{e.type === "cambio" ? ` · USD ${e.usdAmount} a $${e.rate}` : ""}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: e.type === "ingreso" ? GREEN : e.type === "cambio" ? TEAL : BRICK }}>
-                  {e.type === "ingreso" ? "+" : e.type === "cambio" ? "" : "-"}{fmtARS(e.amount)}
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: e.type === "ingreso" ? GREEN : e.type === "cambio" ? TEAL : BRICK }}>
+                    {e.type === "ingreso" ? "+" : e.type === "cambio" ? "" : "-"}{fmtARS(e.amount)}
+                  </div>
+                  <button onClick={() => onDelete(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4" }} aria-label="Borrar">
+                    <Trash2 size={15} />
+                  </button>
                 </div>
-                <button onClick={() => onDelete(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4" }} aria-label="Borrar">
-                  <Trash2 size={15} />
-                </button>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
