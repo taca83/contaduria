@@ -44,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v29 · 2026-07-31 · lista de movimientos de cambio en Divisas
-const APP_VERSION = "v29 · 2026-07-31";
+// v30 · 2026-07-31 · pdf.js worker vía CDN (fix error al leer PDFs en algunos navegadores)
+const APP_VERSION = "v30 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -110,8 +110,11 @@ let _pdfjsLibCache = null;
 async function cargarPdfjs() {
   if (_pdfjsLibCache) return _pdfjsLibCache;
   const pdfjsLib = await import("pdfjs-dist");
-  const workerUrlMod = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
-  pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrlMod.default;
+  // Usamos el worker publicado en cdnjs en vez de que Vite intente
+  // empaquetar el archivo local — esto evita fallos intermitentes
+  // (sobre todo en Safari/iOS) al resolver el worker dinámicamente.
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
   _pdfjsLibCache = pdfjsLib;
   return pdfjsLib;
 }
