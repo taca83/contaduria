@@ -6,10 +6,19 @@ import {
 } from "recharts";
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
-  ArrowUpRight, ArrowDownRight, Landmark, Settings, Trash2, User, Download
+  ArrowUpRight, ArrowDownRight, Landmark, Settings, Trash2, User, Download, Menu
 } from "lucide-react";
 
-const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Salud", "Seguros", "Country/Hebraica", "Ocio", "Educación", "Ropa", "Otros"];
+const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Ocio", "Educación", "Ropa", "Otros"];
+const TAB_LABELS = {
+  resumen: "Resumen",
+  movimientos: "Movimientos",
+  ahorros: "Ahorros e inversiones",
+  presupuestos: "Presupuestos",
+  importar: "Importar",
+  duplicados: "Duplicados",
+  recategorizar: "Recategorizar",
+};
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -25,12 +34,193 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-const APP_VERSION = "v6 · 2026-07-31 · gastos en USD (alquiler Hebraica prorrateado)";
+const APP_VERSION = "v16 · 2026-07-31 · categoría Escuelas (ORT, Comunidad Betel)";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
   return v.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
 }
+// --- Categorización automática por palabra clave (mismas reglas que
+// venimos aplicando a mano en los resúmenes de BBVA) ---
+const CATEGORY_RULES = [
+  ["Escuelas", [/\bORT\b/, "COMUNIDAD BETEL", "BETEL"]],
+  ["Country/Hebraica", ["SOCIEDAD HEBRA", "SOCIEDADHEBRA", "HEBRAICA", "HEBRAIC"]],
+  ["Seguros", ["ZURICH SEGUROS", "ALLIANZ", "BBVA SEGUROS", "BINA SEGUROS"]],
+  ["Salud", ["OSDE", "FARMACIA", "FARMPLUS", "FARMACITY", "NUTRISUPLE", "ORTOPEDIA", "EYELIT", "IVESS"]],
+  ["Ropa", ["ADIDAS", "DEXTER", "RAPANUI"]],
+  ["Transporte", ["AUSOL", "CORREDORESVIALES", "AUBASA", "UBER", "PAYU*AR", "AUTOEQUIPE", "SHELL", "NAFTA"]],
+  ["Servicios", ["CLARO DEB", "PERSONAL FLOW", "PERSONAL ", "EDENOR", "IPLAN", "ADOBE", "FIBER2HOME", "STRIX LOJACK", "SUSCRIPCION", "MCAFEE", "DLOCAL", "ROSMINO Y CIA"]],
+  ["Ocio", ["BUQUEBUS", "GOL LINHAS", "TEATRO", "PLATEANET", "PIAF", "VELEZ", "GEXCORP"]],
+  ["Comida", [
+    "CARREFOUR", "COTO SUCURSAL", "SUPERMERCADOS DIA", "MC SUPERMERCADOS", "ALMAC",
+    "MARKET", "LA CABRERA", "HAVANNA", "ARCOSDORADOS", "MCDONALD", "BURGER KING",
+    "PEDIDOSYA", "DLO*PEDIDOSYA", " RES ", "RESTO", "CAFE", "COFFEE", "TOSTADO",
+    "LUCCIANOS", "DAIU", "LA GRANJA", "GOUT GLUTEN", "SUSHI", "MEDIALUNA",
+    "CONTINENTAL", "LA JUVENIL", "LOVINNE", "GUITARRITA", "BEECOFFEE", "CAFEMARTINEZ",
+    "NANQUE", "ROYAL VENDING", "SUPER TESCO", "MASTER",
+  ]],
+];
+function inferCategory(desc) {
+  const d = (desc || "").toUpperCase();
+  for (const [cat, keywords] of CATEGORY_RULES) {
+    if (keywords.some((k) => (k instanceof RegExp ? k.test(d) : d.includes(k)))) return cat;
+  }
+  return "Otros";
+}
+
+const MESES_ES = { ene: "01", feb: "02", mar: "03", abr: "04", may: "05", jun: "06", jul: "07", ago: "08", sep: "09", set: "09", oct: "10", nov: "11", dic: "12" };
+function fechaBbvaAIso(d, mmm, yy) {
+  const mm = MESES_ES[mmm.toLowerCase().slice(0, 3)];
+  if (!mm) return null;
+  const yyyy = Number(yy) < 70 ? `20${yy}` : `19${yy}`;
+  return `${yyyy}-${mm}-${String(d).padStart(2, "0")}`;
+}
+
+// pdfjs-dist se importa recién acá adentro, en el momento en que se
+// necesita (al subir un PDF) — así el resto de la app puede seguir
+// previsualizándose en entornos que no permiten esa librería de entrada
+// (como el preview de artifacts de Claude). En el servidor real (Vite)
+// esto funciona igual, solo que la carga queda diferida al primer uso.
+let _pdfjsLibCache = null;
+async function cargarPdfjs() {
+  if (_pdfjsLibCache) return _pdfjsLibCache;
+  const pdfjsLib = await import("pdfjs-dist");
+  const workerUrlMod = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrlMod.default;
+  _pdfjsLibCache = pdfjsLib;
+  return pdfjsLib;
+}
+
+// Reconstruye líneas de texto a partir de los items posicionados que
+// devuelve pdf.js (que por sí solo no separa por renglones).
+async function extraerLineasPdf(file) {
+  const pdfjsLib = await cargarPdfjs();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const lineas = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const porY = {};
+    content.items.forEach((it) => {
+      const y = Math.round(it.transform[5]);
+      if (!porY[y]) porY[y] = [];
+      porY[y].push(it);
+    });
+    const ys = Object.keys(porY).map(Number).sort((a, b) => b - a);
+    ys.forEach((y) => {
+      const linea = porY[y].sort((a, b) => a.transform[4] - b.transform[4]).map((it) => it.str).join(" ").replace(/\s+/g, " ").trim();
+      if (linea) lineas.push(linea);
+    });
+  }
+  return lineas;
+}
+
+// Parser específico del formato de resumen BBVA (Visa Signature / Mastercard Black)
+function parsearResumenBBVA(lineas, nombreArchivo) {
+  const filas = [];
+  const avisos = [];
+
+  const cuentaMatch = lineas.find((l) => /Visa Signature|Mastercard Black/i.test(l));
+  const cuenta = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
+
+  let seccionActual = null; // "Hernan Israel" | "Natalia Wajsman" | null
+  const LINEA_MOV = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+(.+?)\s+(\d{6})\s+(-?[\d.,]+)\s*$/;
+
+  lineas.forEach((linea) => {
+    if (/^Consumos\s+(Hernan Israel|Natalia Wajsman)/i.test(linea)) {
+      seccionActual = /Natalia/i.test(linea) ? "Natalia Wajsman" : "Hernan Israel";
+      return;
+    }
+    if (/^TOTAL CONSUMOS/i.test(linea)) { seccionActual = null; return; }
+    if (!seccionActual) return;
+    if (/\bUSD\b\s*\d/.test(linea) && !/,\d{2}\s*$/.test(linea.replace(/USD.*$/, ""))) {
+      // Línea con importe solo en USD (Apple, Google, Spotify, etc.) — la salteamos,
+      // igual que venimos haciendo a mano, porque no es deuda en pesos.
+      return;
+    }
+    const m = linea.match(LINEA_MOV);
+    if (!m) return;
+    const [, dd, mmm, yy, descRaw, , montoRaw] = m;
+    const fecha = fechaBbvaAIso(dd, mmm, yy);
+    if (!fecha) { avisos.push(`No pude leer la fecha en: "${linea}"`); return; }
+    const monto = Number(montoRaw.replace(/\./g, "").replace(",", "."));
+    if (!monto) return;
+    const desc = descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, (s) => ` (cuota${s.trim().replace("C.", " ")})`).trim();
+    filas.push({
+      date: fecha,
+      type: "gasto",
+      category: inferCategory(desc),
+      amount: monto,
+      desc: seccionActual === "Natalia Wajsman" ? `${desc} (Natalia)` : desc,
+      account: cuenta,
+    });
+  });
+
+  return { filas, avisos };
+}
+
+// Extrae el texto crudo de un PDF en orden de lectura (sin reconstruir
+// columnas por posición) — sirve para el resumen de Mercado Pago, que es
+// una sola columna de movimientos y no una tabla como BBVA.
+async function extraerTextoPdf(file) {
+  const pdfjsLib = await cargarPdfjs();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let texto = "";
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    texto += content.items.map((it) => it.str).join(" ") + "\n";
+  }
+  return texto;
+}
+
+// Parser del resumen de Mercado Pago (movimientos en pesos).
+// Ignora todo lo que aparezca después de "RESUMEN DE TENENCIAS EN DÓLARES".
+function parsearResumenMercadoPago(fullText) {
+  const filas = [];
+  const avisos = [];
+  const seccionPesos = fullText.split(/RESUMEN DE TENENCIAS EN D[ÓO]LARES/i)[0];
+
+  const lineRegex = /(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(\d{6,})\s+\$\s*(-?[\d.]+,\d{2})\s+\$\s*(-?[\d.]+,\d{2})/g;
+  const parseARS = (s) => Number(s.replace(/\./g, "").replace(",", "."));
+
+  let m;
+  let encontrados = 0;
+  while ((m = lineRegex.exec(seccionPesos)) !== null) {
+    encontrados++;
+    const [, fechaStr, descRaw, , valorStr] = m;
+    const desc = descRaw.trim();
+
+    if (/^Rendimientos$/i.test(desc)) continue; // regla acordada: se excluyen
+    if (/Hernan Pablo Israel/i.test(desc)) continue; // traspaso a uno mismo, excluido
+
+    const [dd, mm, yyyy] = fechaStr.split("-");
+    const fecha = `${yyyy}-${mm}-${dd}`;
+    const valor = parseARS(valorStr);
+    if (!valor) continue;
+
+    const dLower = desc.toLowerCase();
+    let type, category;
+    if (/cocos capital/.test(dLower)) {
+      // regla acordada: Cocos Capital = ahorro/inversión
+      type = valor < 0 ? "ahorro" : "ingreso";
+      category = valor < 0 ? "Otro" : "Otros ingresos";
+    } else if (valor < 0) {
+      type = "gasto";
+      category = inferCategory(desc);
+    } else {
+      type = "ingreso";
+      category = "Otros ingresos";
+    }
+
+    filas.push({ date: fecha, type, category, amount: Math.abs(valor), desc, account: "Mercado Pago" });
+  }
+  if (encontrados === 0) avisos.push("No encontré líneas con el formato esperado de Mercado Pago.");
+  return { filas, avisos };
+}
+
 function monthKey(dateStr) {
   return dateStr ? dateStr.slice(0, 7) : "";
 }
@@ -41,8 +231,21 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+function safeEnv() {
+  // Leemos de window en vez de import.meta.env: funciona igual en el build
+  // real de Vite (ver index.html) y no rompe nada acá en el preview de
+  // Claude, donde estas variables directamente no van a existir.
+  try {
+    return {
+      url: typeof window !== "undefined" ? window.__SUPABASE_URL__ : undefined,
+      key: typeof window !== "undefined" ? window.__SUPABASE_ANON_KEY__ : undefined,
+    };
+  } catch {
+    return { url: undefined, key: undefined };
+  }
+}
+const { url: SUPABASE_URL, key: SUPABASE_ANON_KEY } = safeEnv();
+const HAS_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY && !SUPABASE_URL.includes("%VITE_"));
 
 async function sb(path, options = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -111,6 +314,21 @@ function safeSet(key, value) {
   }
 }
 
+// --- Modo local (preview sin Supabase) ---
+// Se usa automáticamente cuando no hay variables de entorno de Supabase
+// (por ejemplo, acá en el preview de Claude). Los datos quedan solo en
+// este navegador, no se pierden los reales de producción.
+function mockLoad() {
+  return {
+    entries: safeGet("mock_entries") || [],
+    budgets: safeGet("mock_budgets") || {},
+    names: safeGet("mock_names") || [],
+  };
+}
+function mockSaveEntries(entries) { safeSet("mock_entries", entries); }
+function mockSaveBudgets(budgets) { safeSet("mock_budgets", budgets); }
+function mockSaveNames(names) { safeSet("mock_names", names); }
+
 export default function FinanzasApp() {
   const [loading, setLoading] = useState(true);
   const [profileName, setProfileName] = useState(null);
@@ -119,6 +337,7 @@ export default function FinanzasApp() {
   const [entries, setEntries] = useState([]);
   const [budgets, setBudgets] = useState({});
   const [tab, setTab] = useState("resumen");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [formType, setFormType] = useState("gasto");
   const [saving, setSaving] = useState(false);
@@ -129,6 +348,14 @@ export default function FinanzasApp() {
     (async () => {
       const prof = safeGet("profile");
       if (prof?.name) setProfileName(prof.name);
+      if (!HAS_SUPABASE) {
+        const mock = mockLoad();
+        setConfig({ names: mock.names });
+        setEntries(mock.entries);
+        setBudgets(mock.budgets);
+        setLoading(false);
+        return;
+      }
       try {
         const [cfgRows, entRows, budRows] = await Promise.all([
           sb("config?id=eq.1&select=names"),
@@ -156,23 +383,35 @@ export default function FinanzasApp() {
     if (!config.names.includes(clean)) {
       const next = { names: [...config.names, clean] };
       setConfig(next);
+      if (!HAS_SUPABASE) { mockSaveNames(next.names); return; }
       await sb("config?id=eq.1", { method: "PATCH", body: JSON.stringify({ names: next.names }) });
     }
   }
 
   async function addEntry(entry) {
     const full = { ...entry, id: uid(), who: profileName };
-    setEntries((prev) => [full, ...prev]);
+    setEntries((prev) => {
+      const next = [full, ...prev];
+      if (!HAS_SUPABASE) mockSaveEntries(next);
+      return next;
+    });
+    if (!HAS_SUPABASE) return;
     await sb("entries", { method: "POST", body: JSON.stringify([entryToDb(full)]) });
   }
 
   async function deleteEntry(id) {
-    setEntries((prev) => prev.filter((e) => e.id !== id));
+    setEntries((prev) => {
+      const next = prev.filter((e) => e.id !== id);
+      if (!HAS_SUPABASE) mockSaveEntries(next);
+      return next;
+    });
+    if (!HAS_SUPABASE) return;
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   async function updateBudgets(next) {
     setBudgets(next);
+    if (!HAS_SUPABASE) { mockSaveBudgets(next); return; }
     const rows = Object.entries(next).map(([category, limit_amount]) => ({ category, limit_amount: Number(limit_amount) }));
     if (rows.length > 0) {
       await sb("budgets", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
@@ -203,7 +442,19 @@ export default function FinanzasApp() {
   }
 
   const now = new Date();
-  const thisMonth = now.toISOString().slice(0, 7);
+  const realThisMonth = now.toISOString().slice(0, 7);
+  const [selectedMonth, setSelectedMonth] = useState(realThisMonth);
+  const thisMonth = selectedMonth;
+
+  function shiftMonth(delta) {
+    const [y, m] = selectedMonth.split("-").map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    setSelectedMonth(d.toISOString().slice(0, 7));
+  }
+  function monthLabel(key) {
+    const [y, m] = key.split("-").map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString("es-AR", { month: "long", year: "numeric" });
+  }
 
   const thisMonthEntries = useMemo(
     () => entries.filter((e) => monthKey(e.date) === thisMonth),
@@ -297,6 +548,11 @@ export default function FinanzasApp() {
             />
             <button onClick={() => chooseName(nameInput)} style={btnPrimary}>Entrar</button>
           </div>
+          {!HAS_SUPABASE && (
+            <div style={{ fontSize: 11, color: GOLD, marginTop: 12, textAlign: "right" }}>
+              ⚠ Vista previa local — sin conexión a Supabase (normal en Claude)
+            </div>
+          )}
           <div style={{ fontSize: 10, color: "#c4bda8", marginTop: 18, textAlign: "right" }}>{APP_VERSION}</div>
         </div>
       </div>
@@ -321,9 +577,24 @@ export default function FinanzasApp() {
           <div>
             <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600 }}>Contaduría</div>
             <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2 }}>
-              Hola, {profileName} · {now.toLocaleDateString("es-AR", { month: "long", year: "numeric" })}
+              Hola, {profileName}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+              <button onClick={() => shiftMonth(-1)} aria-label="Mes anterior" style={{ background: "none", border: "none", cursor: "pointer", color: PAPER, opacity: 0.8, padding: 2 }}>◀</button>
+              <span style={{ fontSize: 13, fontWeight: 700, textTransform: "capitalize", minWidth: 130, textAlign: "center" }}>{monthLabel(selectedMonth)}</span>
+              <button onClick={() => shiftMonth(1)} aria-label="Mes siguiente" style={{ background: "none", border: "none", cursor: "pointer", color: PAPER, opacity: 0.8, padding: 2 }}>▶</button>
+              {selectedMonth !== realThisMonth && (
+                <button onClick={() => setSelectedMonth(realThisMonth)} style={{ background: "none", border: `1px solid ${TEAL}`, borderRadius: 6, color: TEAL, fontSize: 11, padding: "2px 8px", cursor: "pointer" }}>
+                  Hoy
+                </button>
+              )}
             </div>
             <div style={{ fontSize: 9.5, color: "#5f7376", marginTop: 6 }}>{APP_VERSION}</div>
+            {!HAS_SUPABASE && (
+              <div style={{ fontSize: 10.5, color: GOLD, marginTop: 4, fontWeight: 700 }}>
+                ⚠ Vista previa local — no conectado a Supabase
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             {config.names.map((n) => (
@@ -356,33 +627,53 @@ export default function FinanzasApp() {
           </div>
         </div>
 
-        {/* Tabs */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 22, gap: 8 }}>
-          <div className="tabbar" style={{ display: "flex", gap: 4, borderBottom: `1px solid #ddd6c4`, overflowX: "auto", flex: 1 }}>
-            {[
-              ["resumen", "Resumen"],
-              ["movimientos", "Movimientos"],
-              ["ahorros", "Ahorros e inversiones"],
-              ["presupuestos", "Presupuestos"],
-              ["importar", "Importar"],
-              ["duplicados", "Duplicados"],
-              ["recategorizar", "Recategorizar"],
-            ].map(([key, label]) => (
-              <button key={key} onClick={() => setTab(key)} style={{
-                background: "none", border: "none", padding: "10px 12px", cursor: "pointer",
-                fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap",
-                color: tab === key ? INK : "#9a9488",
-                borderBottom: tab === key ? `2px solid ${TEAL}` : "2px solid transparent",
-              }}>{label}</button>
-            ))}
+        {/* Menú */}
+        <div style={{ position: "relative", marginTop: 22 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              style={{
+                display: "flex", alignItems: "center", gap: 8, background: "#fff",
+                border: `1px solid #ddd6c4`, borderRadius: 8, padding: "10px 14px",
+                cursor: "pointer", fontSize: 13.5, fontWeight: 700, color: INK, flex: 1,
+              }}
+            >
+              <Menu size={17} />
+              {TAB_LABELS[tab] || "Menú"}
+            </button>
+            <button
+              onClick={exportarExcel}
+              title="Exportar todos los movimientos a Excel"
+              style={{ ...btnOutline, padding: "8px 12px", fontSize: 12.5, flexShrink: 0 }}
+            >
+              <Download size={15} /> Excel
+            </button>
           </div>
-          <button
-            onClick={exportarExcel}
-            title="Exportar todos los movimientos a Excel"
-            style={{ ...btnOutline, padding: "8px 12px", fontSize: 12.5, flexShrink: 0, marginBottom: 4 }}
-          >
-            <Download size={15} /> Excel
-          </button>
+          {menuOpen && (
+            <>
+              <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 9 }} />
+              <div style={{
+                position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, zIndex: 10,
+                background: "#fff", borderRadius: 8, boxShadow: "0 8px 28px rgba(27,42,46,0.18)",
+                border: "1px solid #ddd6c4", overflow: "hidden",
+              }}>
+                {Object.entries(TAB_LABELS).map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => { setTab(key); setMenuOpen(false); }}
+                    style={{
+                      display: "block", width: "100%", textAlign: "left", padding: "11px 16px",
+                      background: tab === key ? PAPER_DIM : "#fff", border: "none", borderBottom: "1px solid #f0ece0",
+                      cursor: "pointer", fontSize: 13.5, fontWeight: tab === key ? 700 : 500,
+                      color: tab === key ? TEAL : INK,
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         <div style={{ marginTop: 20 }}>
@@ -391,12 +682,13 @@ export default function FinanzasApp() {
               gastosPorCategoria={gastosPorCategoria}
               totalAhorradoHistorico={totalAhorradoHistorico}
               entries={entries}
+              thisMonthEntries={thisMonthEntries}
               cambiosStats={cambiosStats}
               totalGastosUsd={totalGastosUsd}
             />
           )}
           {tab === "movimientos" && (
-            <MovimientosTab entries={entries} onDelete={deleteEntry} profileName={profileName} />
+            <MovimientosTab entries={thisMonthEntries} onDelete={deleteEntry} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
           )}
           {tab === "ahorros" && (
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
@@ -418,10 +710,14 @@ export default function FinanzasApp() {
                   vistosEnLote.add(s);
                   nuevos.push({ ...r, id: uid(), who: profileName });
                 });
-                if (nuevos.length > 0) {
+                if (HAS_SUPABASE && nuevos.length > 0) {
                   await sb("entries", { method: "POST", body: JSON.stringify(nuevos.map(entryToDb)) });
                 }
-                setEntries((prev) => [...nuevos, ...prev]);
+                setEntries((prev) => {
+                  const next = [...nuevos, ...prev];
+                  if (!HAS_SUPABASE) mockSaveEntries(next);
+                  return next;
+                });
                 return { imported: nuevos.length, duplicates: duplicados };
               }}
             />
@@ -436,6 +732,7 @@ export default function FinanzasApp() {
                 const idSet = new Set(ids);
                 const next = entries.map((e) => idSet.has(e.id) ? { ...e, category: nuevaCategoria } : e);
                 setEntries(next);
+                if (!HAS_SUPABASE) { mockSaveEntries(next); return; }
                 await Promise.all(
                   ids.map((id) =>
                     sb(`entries?id=eq.${encodeURIComponent(id)}`, {
@@ -489,7 +786,8 @@ function EmptyState({ text }) {
   );
 }
 
-function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, cambiosStats, totalGastosUsd }) {
+function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd }) {
+  const [expandedCat, setExpandedCat] = useState(null);
   const [rango, setRango] = useState(6);
 
   const chartData = useMemo(() => {
@@ -568,15 +866,44 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, cambi
               </ResponsiveContainer>
             </div>
             <div style={{ flex: 1, minWidth: 160 }}>
-              {gastosPorCategoria.map((c, i) => (
-                <div key={c.name} className="cat-row" style={{ display: "flex", justifyContent: "space-between", padding: "5px 6px", borderRadius: 6, fontSize: 13 }}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: CAT_COLORS[i % CAT_COLORS.length] }} />
-                    {c.name}
-                  </span>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(c.value)}</span>
-                </div>
-              ))}
+              {gastosPorCategoria.map((c, i) => {
+                const isOpen = expandedCat === c.name;
+                const movs = isOpen
+                  ? thisMonthEntries
+                      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS" && e.category === c.name)
+                      .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
+                  : [];
+                return (
+                  <div key={c.name}>
+                    <div
+                      className="cat-row"
+                      onClick={() => setExpandedCat(isOpen ? null : c.name)}
+                      style={{ display: "flex", justifyContent: "space-between", padding: "5px 6px", borderRadius: 6, fontSize: 13, cursor: "pointer", background: isOpen ? "#f2eee2" : "transparent" }}
+                    >
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: CAT_COLORS[i % CAT_COLORS.length] }} />
+                        {c.name}
+                      </span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(c.value)}</span>
+                        <span style={{ fontSize: 10, color: "#8a9698" }}>{isOpen ? "▲" : "▼"}</span>
+                      </span>
+                    </div>
+                    {isOpen && (
+                      <div style={{ padding: "4px 6px 10px 22px", display: "flex", flexDirection: "column", gap: 4 }}>
+                        {movs.length === 0 ? (
+                          <div style={{ fontSize: 12, color: "#8a9698" }}>Sin movimientos.</div>
+                        ) : movs.map((e) => (
+                          <div key={e.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#5a6b6d" }}>
+                            <span>{e.date} · {e.desc || "(sin descripción)"}{e.account ? ` · ${e.account}` : ""}</span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0, marginLeft: 8 }}>{fmtARS(e.amount)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -646,12 +973,17 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, cambi
   );
 }
 
-function MovimientosTab({ entries, onDelete, profileName }) {
+function MovimientosTab({ entries, onDelete, profileName, monthLabel }) {
   const [filter, setFilter] = useState("todos");
   const filtered = entries.filter((e) => filter === "todos" ? (e.type === "gasto" || e.type === "ingreso") : e.type === filter);
 
   return (
     <div>
+      {monthLabel && (
+        <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 10, textTransform: "capitalize" }}>
+          Mostrando: <b>{monthLabel}</b>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
         {[["todos", "Todos"], ["gasto", "Gastos"], ["ingreso", "Ingresos"], ["cambio", "Cambios USD"]].map(([k, l]) => (
           <button key={k} onClick={() => setFilter(k)} style={{
@@ -833,6 +1165,61 @@ function ImportarTab({ onImport }) {
   const [importing, setImporting] = useState(false);
   const [fileName, setFileName] = useState("");
   const [lastImportMsg, setLastImportMsg] = useState(null);
+  const [pdfProcesando, setPdfProcesando] = useState(false);
+  const [pdfAvisos, setPdfAvisos] = useState([]);
+  const [pdfNombres, setPdfNombres] = useState([]);
+
+  async function handlePdfFiles(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setPdfProcesando(true);
+    setPdfAvisos([]);
+    setPdfNombres(files.map((f) => f.name));
+    let todasLasFilas = [];
+    let avisos = [];
+    for (const file of files) {
+      try {
+        const lineas = await extraerLineasPdf(file);
+        const { filas, avisos: av } = parsearResumenBBVA(lineas, file.name);
+        if (filas.length === 0) {
+          avisos.push(`${file.name}: no reconocí movimientos con el formato BBVA. Puede ser otro banco/billetera — pasámelo a mí directamente en el chat para procesarlo.`);
+        }
+        todasLasFilas = todasLasFilas.concat(filas);
+        avisos = avisos.concat(av.map((a) => `${file.name}: ${a}`));
+      } catch (err) {
+        avisos.push(`${file.name}: no pude leer el PDF (${err.message}).`);
+      }
+    }
+    setPdfAvisos(avisos);
+    setResult({ rows: todasLasFilas, errors: [] });
+    setPdfProcesando(false);
+  }
+
+  async function handlePdfFilesMP(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setPdfProcesando(true);
+    setPdfAvisos([]);
+    setPdfNombres(files.map((f) => f.name));
+    let todasLasFilas = [];
+    let avisos = [];
+    for (const file of files) {
+      try {
+        const texto = await extraerTextoPdf(file);
+        const { filas, avisos: av } = parsearResumenMercadoPago(texto);
+        if (filas.length === 0) {
+          avisos.push(`${file.name}: no reconocí movimientos con el formato de Mercado Pago. Pasámelo a mí en el chat para revisarlo.`);
+        }
+        todasLasFilas = todasLasFilas.concat(filas);
+        avisos = avisos.concat(av.map((a) => `${file.name}: ${a}`));
+      } catch (err) {
+        avisos.push(`${file.name}: no pude leer el PDF (${err.message}).`);
+      }
+    }
+    setPdfAvisos(avisos);
+    setResult({ rows: todasLasFilas, errors: [] });
+    setPdfProcesando(false);
+  }
 
   function handleFile(e) {
     const file = e.target.files?.[0];
@@ -883,6 +1270,36 @@ function ImportarTab({ onImport }) {
           </button>
         </div>
       )}
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Subir resumen en PDF (Mercado Pago)</div>
+        <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 12 }}>
+          Solo la sección en pesos (ignora tenencias en dólares). Excluye rendimientos y traspasos a vos mismo automáticamente.
+        </div>
+        <label style={{ ...btnOutline, cursor: "pointer", marginBottom: 10, display: "inline-flex" }}>
+          <input type="file" accept="application/pdf" multiple onChange={handlePdfFilesMP} style={{ display: "none" }} />
+          {pdfProcesando ? "Leyendo PDF..." : "Elegir PDF(s)"}
+        </label>
+      </div>
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Subir resumen en PDF (BBVA)</div>
+        <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 12 }}>
+          Subí uno o varios PDFs de resumen de Visa/Mastercard BBVA — se leen y categorizan solos, sin pasar por el chat. Después revisá abajo antes de importar.
+        </div>
+        <label style={{ ...btnOutline, cursor: "pointer", marginBottom: 10, display: "inline-flex" }}>
+          <input type="file" accept="application/pdf" multiple onChange={handlePdfFiles} style={{ display: "none" }} />
+          {pdfProcesando ? "Leyendo PDF..." : "Elegir PDF(s)"}
+        </label>
+        {pdfNombres.length > 0 && (
+          <div style={{ fontSize: 12, color: TEAL, marginBottom: 8 }}>{pdfNombres.join(", ")}</div>
+        )}
+        {pdfAvisos.length > 0 && (
+          <div style={{ background: "#fbf1de", border: `1px solid ${GOLD}`, borderRadius: 8, padding: 10, fontSize: 12, marginTop: 4 }}>
+            {pdfAvisos.map((a, i) => <div key={i}>{a}</div>)}
+          </div>
+        )}
+      </div>
+
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Importar movimientos</div>
         <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 12 }}>
