@@ -44,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v34 · 2026-07-31 · pdfjs-dist fijado en v3.11.174 (fix bug de iOS/Safari)
-const APP_VERSION = "v34 · 2026-07-31";
+// v35 · 2026-07-31 · fix regex de importe en facturas de colegio (ORT)
+const APP_VERSION = "v35 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -287,7 +287,7 @@ function parsearFacturaColegio(fullText, overrides = {}) {
 
   const periodoMatch = texto.match(new RegExp(`\\b(${MESES_LARGOS.join("|")})\\s+(\\d{4})\\b`, "i"));
   const cuotaMatch = texto.match(/Cuota\s+(\d+)\s+de\s+(\d+)/i);
-  const importeMatch = texto.match(/ARANCEL[^0-9]*?([\d.]+,\d{2})/i);
+  const importeMatch = texto.match(/ARANCEL.*?([\d.]+,\d{2})/i);
 
   if (!periodoMatch || !importeMatch) {
     avisos.push(`Reconocí que es ${escuela}, pero no pude leer el período o el importe del arancel. Revisá el PDF o pasámelo directamente en el chat.`);
