@@ -44,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v31 · 2026-07-31 · worker de PDF como blob local + timeout para no colgarse
-const APP_VERSION = "v31 · 2026-07-31";
+// v32 · 2026-07-31 · worker de PDF servido como archivo estático propio (/pdf.worker.min.mjs)
+const APP_VERSION = "v32 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -110,21 +110,10 @@ let _pdfjsLibCache = null;
 async function cargarPdfjs() {
   if (_pdfjsLibCache) return _pdfjsLibCache;
   const pdfjsLib = await import("pdfjs-dist");
-  const workerUrl = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
-  try {
-    // Bajamos el código del worker y lo servimos como blob del mismo
-    // origen — algunos navegadores bloquean en silencio un Worker()
-    // apuntando directo a otro dominio, sin tirar error (se queda
-    // "colgado" en vez de fallar).
-    const resp = await conTimeout(fetch(workerUrl), 15000, "No pude descargar el worker de lectura de PDF (timeout de conexión).");
-    if (!resp.ok) throw new Error(`No pude bajar el worker (HTTP ${resp.status})`);
-    const code = await resp.text();
-    const blob = new Blob([code], { type: "text/javascript" });
-    pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
-  } catch (e) {
-    console.error("Fallback a worker remoto directo:", e);
-    pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
-  }
+  // El worker se sirve como archivo estático propio (public/pdf.worker.min.mjs),
+  // no desde un CDN ni armado dinámicamente — evita todos los problemas de
+  // CORS/bloqueo silencioso/tipo de módulo que dieron los otros enfoques.
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
   _pdfjsLibCache = pdfjsLib;
   return pdfjsLib;
 }
