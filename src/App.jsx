@@ -44,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v35 · 2026-07-31 · fix regex de importe en facturas de colegio (ORT)
-const APP_VERSION = "v35 · 2026-07-31";
+// v38 · 2026-07-31 · editar y forzar carga de descartados por duplicado
+const APP_VERSION = "v38 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -218,6 +218,15 @@ function parsearResumenMercadoPago(fullText, overrides = {}) {
   const avisos = [];
   const seccionPesos = fullText.split(/RESUMEN DE TENENCIAS EN D[ÓO]LARES/i)[0];
 
+  // Detecta de quién es la cuenta según el titular que figura en el propio
+  // PDF, para que quede a su nombre sin importar quién lo suba a la app.
+  // Miramos solo el encabezado (antes de la lista de movimientos) para no
+  // confundirnos con una transferencia a la otra persona mencionada ahí.
+  const encabezado = fullText.slice(0, 800);
+  let titular = null;
+  if (/NATALIA|WAJSMAN/i.test(encabezado)) titular = "Nati";
+  else if (/HERNAN/i.test(encabezado)) titular = "negro";
+
   const lineRegex = /(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(\d{6,})\s+\$\s*(-?[\d.]+,\d{2})\s+\$\s*(-?[\d.]+,\d{2})/g;
   const parseARS = (s) => Number(s.replace(/\./g, "").replace(",", "."));
 
@@ -250,7 +259,7 @@ function parsearResumenMercadoPago(fullText, overrides = {}) {
       category = "Otros ingresos";
     }
 
-    filas.push({ date: fecha, type, category, amount: Math.abs(valor), desc, account: "Mercado Pago" });
+    filas.push({ date: fecha, type, category, amount: Math.abs(valor), desc, account: "Mercado Pago", who: titular || undefined });
   }
   if (encontrados === 0) avisos.push("No encontré líneas con el formato esperado de Mercado Pago.");
   return { filas, avisos };
@@ -880,12 +889,15 @@ export default function FinanzasApp() {
                 const existentes = new Set(entries.map(sig));
                 const vistosEnLote = new Set();
                 const nuevos = [];
-                let duplicados = 0;
+                const descartados = [];
                 rows.forEach((r) => {
                   const s = sig(r);
-                  if (existentes.has(s) || vistosEnLote.has(s)) { duplicados++; return; }
+                  if (existentes.has(s) || vistosEnLote.has(s)) {
+                    descartados.push({ date: r.date, desc: r.desc, amount: r.amount, account: r.account, category: r.category, type: r.type });
+                    return;
+                  }
                   vistosEnLote.add(s);
-                  nuevos.push({ ...r, id: uid(), who: profileName });
+                  nuevos.push({ ...r, id: uid(), who: r.who || profileName });
                 });
                 if (HAS_SUPABASE && nuevos.length > 0) {
                   await sb("entries", { method: "POST", body: JSON.stringify(nuevos.map(entryToDb)) });
@@ -898,15 +910,16 @@ export default function FinanzasApp() {
                 await logAudit("import", {
                   formato: formato || "?",
                   cantidad_importada: nuevos.length,
-                  cantidad_duplicados: duplicados,
+                  cantidad_duplicados: descartados.length,
                   cantidad_total: rows.length,
+                  duplicados_detalle: descartados,
                 }, null, String(nuevos.length));
-                return { imported: nuevos.length, duplicates: duplicados };
+                return { imported: nuevos.length, duplicates: descartados.length };
               }}
             />
           )}
           {tab === "duplicados" && (
-            <DuplicadosTab entries={entries} onDelete={deleteEntry} />
+            <DuplicadosTab entries={entries} onDelete={deleteEntry} onForceAdd={addEntry} />
           )}
           {tab === "divisas" && (
             <DivisasTab cambiosStats={cambiosStats} cambios={cambios} onDelete={deleteEntry} />
@@ -1862,8 +1875,61 @@ function HistorialTab() {
   );
 }
 
-function DuplicadosTab({ entries, onDelete }) {
+function DuplicadosTab({ entries, onDelete, onForceAdd }) {
   const [borrando, setBorrando] = useState(false);
+  const [rechazados, setRechazados] = useState(null);
+  const [editKey, setEditKey] = useState(null);
+  const [editDesc, setEditDesc] = useState("");
+  const [editMonto, setEditMonto] = useState("");
+  const [procesando, setProcesando] = useState(null);
+  const [procesados, setProcesados] = useState(new Set());
+
+  useEffect(() => {
+    (async () => {
+      let rows;
+      if (!HAS_SUPABASE) {
+        rows = safeGet("mock_audit_log") || [];
+      } else {
+        try {
+          rows = await sb("audit_log?select=*&accion=eq.import&order=created_at.desc&limit=50");
+        } catch (e) {
+          console.error(e);
+          rows = [];
+        }
+      }
+      const conDuplicados = (rows || []).filter((r) => (r.entry_snapshot?.cantidad_duplicados || 0) > 0);
+      setRechazados(conDuplicados);
+    })();
+  }, []);
+
+  function keyDe(rowId, i) {
+    return `${rowId}-${i}`;
+  }
+  function startEdit(rowId, i, d) {
+    setEditKey(keyDe(rowId, i));
+    setEditDesc(d.desc || "");
+    setEditMonto(String(d.amount ?? ""));
+  }
+  function cancelEdit() {
+    setEditKey(null);
+    setEditDesc("");
+    setEditMonto("");
+  }
+  async function procesarDeTodosModos(rowId, i, d) {
+    const k = keyDe(rowId, i);
+    setProcesando(k);
+    await onForceAdd({
+      date: d.date,
+      type: d.type || "gasto",
+      category: d.category || "Otros",
+      amount: Number(editKey === k ? editMonto : d.amount) || 0,
+      desc: editKey === k ? editDesc.trim() : (d.desc || ""),
+      account: d.account || "",
+    });
+    setProcesados((prev) => new Set(prev).add(k));
+    setProcesando(null);
+    setEditKey(null);
+  }
 
   const grupos = useMemo(() => {
     const sig = (e) => `${e.date}|${Number(e.amount)}|${(e.desc || "").trim().toLowerCase()}|${(e.account || "").trim().toLowerCase()}`;
@@ -1890,7 +1956,79 @@ function DuplicadosTab({ entries, onDelete }) {
   }
 
   return (
-    <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {rechazados && rechazados.length > 0 && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Descartados al importar</div>
+          <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
+            Movimientos que no se cargaron porque ya existía uno igual (misma fecha, monto, descripción y cuenta) al momento de importar.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 360, overflowY: "auto" }}>
+            {rechazados.map((r) => {
+              let fecha = "";
+              try { fecha = new Date(r.created_at).toLocaleString("es-AR"); } catch {}
+              const detalle = r.entry_snapshot?.duplicados_detalle || [];
+              return (
+                <div key={r.id} style={{ background: "#fbf1de", borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>
+                    Importación {r.entry_snapshot?.formato || ""} · {fecha} · {detalle.length} descartado{detalle.length !== 1 ? "s" : ""}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {detalle.map((d, i) => {
+                      const k = keyDe(r.id, i);
+                      const editing = editKey === k;
+                      const yaCargado = procesados.has(k);
+                      return (
+                        <div key={i} style={{ background: "#fff", borderRadius: 6, padding: "6px 8px" }}>
+                          {editing ? (
+                            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                              <input
+                                autoFocus
+                                value={editDesc}
+                                onChange={(ev) => setEditDesc(ev.target.value)}
+                                placeholder="Descripción"
+                                style={{ ...inputStyle, padding: "5px 8px", fontSize: 12, flex: 1, minWidth: 120 }}
+                              />
+                              <input
+                                type="number"
+                                value={editMonto}
+                                onChange={(ev) => setEditMonto(ev.target.value)}
+                                placeholder="Monto"
+                                style={{ ...inputStyle, padding: "5px 8px", fontSize: 12, width: 100, fontFamily: "'IBM Plex Mono', monospace" }}
+                              />
+                              <button onClick={() => procesarDeTodosModos(r.id, i, d)} disabled={procesando === k} style={{ ...btnPrimary, padding: "5px 10px", fontSize: 11.5 }}>
+                                {procesando === k ? "Cargando..." : "Cargar de todos modos"}
+                              </button>
+                              <button onClick={cancelEdit} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4" }} aria-label="Cancelar">
+                                <X size={15} />
+                              </button>
+                            </div>
+                          ) : (
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 12, color: yaCargado ? "#b8b2a4" : "#5a6b6d", textDecoration: yaCargado ? "line-through" : "none" }}>
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                                {d.date} · {d.desc || "(sin descripción)"}{d.account ? ` · ${d.account}` : ""}
+                              </span>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0 }}>{fmtARS(d.amount || 0)}</span>
+                              {!yaCargado && (
+                                <button onClick={() => startEdit(r.id, i, d)} style={{ border: "none", background: "none", cursor: "pointer", color: TEAL, flexShrink: 0 }} aria-label="Editar y procesar">
+                                  <Pencil size={13} />
+                                </button>
+                              )}
+                              {yaCargado && <span style={{ fontSize: 10.5, color: GREEN, flexShrink: 0, fontWeight: 700 }}>Cargado ✓</span>}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
       <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Duplicados</div>
       <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
         Considera duplicado a todo movimiento con misma fecha, monto, descripción y cuenta. Útil para limpiar lo que se haya importado más de una vez antes de este chequeo.
@@ -1918,6 +2056,7 @@ function DuplicadosTab({ entries, onDelete }) {
           </button>
         </>
       )}
+      </div>
     </div>
   );
 }
