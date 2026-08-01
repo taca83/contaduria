@@ -44,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v30 · 2026-07-31 · pdf.js worker vía CDN (fix error al leer PDFs en algunos navegadores)
-const APP_VERSION = "v30 · 2026-07-31";
+// v31 · 2026-07-31 · worker de PDF como blob local + timeout para no colgarse
+const APP_VERSION = "v31 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -110,13 +110,30 @@ let _pdfjsLibCache = null;
 async function cargarPdfjs() {
   if (_pdfjsLibCache) return _pdfjsLibCache;
   const pdfjsLib = await import("pdfjs-dist");
-  // Usamos el worker publicado en cdnjs en vez de que Vite intente
-  // empaquetar el archivo local — esto evita fallos intermitentes
-  // (sobre todo en Safari/iOS) al resolver el worker dinámicamente.
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+  const workerUrl = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+  try {
+    // Bajamos el código del worker y lo servimos como blob del mismo
+    // origen — algunos navegadores bloquean en silencio un Worker()
+    // apuntando directo a otro dominio, sin tirar error (se queda
+    // "colgado" en vez de fallar).
+    const resp = await conTimeout(fetch(workerUrl), 15000, "No pude descargar el worker de lectura de PDF (timeout de conexión).");
+    if (!resp.ok) throw new Error(`No pude bajar el worker (HTTP ${resp.status})`);
+    const code = await resp.text();
+    const blob = new Blob([code], { type: "text/javascript" });
+    pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
+  } catch (e) {
+    console.error("Fallback a worker remoto directo:", e);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+  }
   _pdfjsLibCache = pdfjsLib;
   return pdfjsLib;
+}
+
+function conTimeout(promise, ms, mensaje) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(mensaje)), ms)),
+  ]);
 }
 
 // Reconstruye líneas de texto a partir de los items posicionados que
@@ -124,7 +141,7 @@ async function cargarPdfjs() {
 async function extraerLineasPdf(file) {
   const pdfjsLib = await cargarPdfjs();
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const pdf = await conTimeout(pdfjsLib.getDocument({ data: buf }).promise, 25000, "El PDF tardó demasiado en procesarse (más de 25s). Puede ser un problema de conexión con el worker de lectura.");
   const lineas = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
@@ -194,7 +211,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
 async function extraerTextoPdf(file) {
   const pdfjsLib = await cargarPdfjs();
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const pdf = await conTimeout(pdfjsLib.getDocument({ data: buf }).promise, 25000, "El PDF tardó demasiado en procesarse (más de 25s). Puede ser un problema de conexión con el worker de lectura.");
   let texto = "";
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
