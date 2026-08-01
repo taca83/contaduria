@@ -34,7 +34,7 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-const APP_VERSION = "v16 · 2026-07-31 · categoría Escuelas (ORT, Comunidad Betel)";
+const APP_VERSION = "v17 · 2026-07-31 · recategorizar con chips visuales y preview seleccionable";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1416,11 +1416,38 @@ function DuplicadosTab({ entries, onDelete }) {
   );
 }
 
+function CategoryChips({ selected, onSelect, cats = GASTO_CATS }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+      {cats.map((c) => {
+        const i = GASTO_CATS.indexOf(c);
+        const color = CAT_COLORS[(i >= 0 ? i : 0) % CAT_COLORS.length];
+        const active = selected === c;
+        return (
+          <button
+            key={c}
+            onClick={() => onSelect(c)}
+            style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 20,
+              border: `1.5px solid ${active ? color : "#ddd6c4"}`, background: active ? color : "#fff",
+              color: active ? "#fff" : INK, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+            }}
+          >
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: active ? "#fff" : color }} />
+            {c}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function RecategorizarTab({ entries, onApply }) {
   const [desde, setDesde] = useState(GASTO_CATS[0]);
   const [hacia, setHacia] = useState(GASTO_CATS[0]);
   const [busq, setBusq] = useState("");
   const [applying, setApplying] = useState(false);
+  const [excluidos, setExcluidos] = useState(new Set());
 
   const coincidencias = useMemo(() => {
     return entries.filter((e) => {
@@ -1429,44 +1456,71 @@ function RecategorizarTab({ entries, onApply }) {
     });
   }, [entries, desde, busq]);
 
+  useEffect(() => {
+    setExcluidos(new Set());
+  }, [desde, busq]);
+
+  const seleccionados = coincidencias.filter((e) => !excluidos.has(e.id));
+
+  function toggleExcluido(id) {
+    setExcluidos((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
   async function handleApply() {
-    if (coincidencias.length === 0) return;
+    if (seleccionados.length === 0) return;
     setApplying(true);
-    await onApply(coincidencias.map((e) => e.id), hacia);
+    await onApply(seleccionados.map((e) => e.id), hacia);
     setApplying(false);
-    alert(`${coincidencias.length} movimientos actualizados a "${hacia}".`);
+    setExcluidos(new Set());
   }
 
   return (
     <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
       <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Recategorizar en bloque</div>
       <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
-        Cambiá la categoría de muchos movimientos a la vez. Filtrá por categoría actual o por texto de la descripción.
+        Elegí una categoría actual (o buscá por texto), revisá qué movimientos coinciden, destildá los que no correspondan, y elegí a qué categoría pasarlos.
       </div>
 
-      <label style={labelStyle}>Buscar por texto en descripción (opcional, ej: "Hebraica")</label>
+      <label style={labelStyle}>Buscar por texto en descripción (opcional)</label>
       <input value={busq} onChange={(e) => setBusq(e.target.value)} placeholder="Ej: Hebraica" style={{ ...inputStyle, marginBottom: 14 }} />
 
       {!busq.trim() && (
         <>
           <label style={labelStyle}>Categoría actual</label>
-          <select value={desde} onChange={(e) => setDesde(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }}>
-            {GASTO_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
+          <CategoryChips selected={desde} onSelect={setDesde} />
         </>
       )}
 
       <label style={labelStyle}>Cambiar a</label>
-      <select value={hacia} onChange={(e) => setHacia(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }}>
-        {GASTO_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
-      </select>
+      <CategoryChips selected={hacia} onSelect={setHacia} />
 
-      <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 12 }}>
-        Coinciden <b>{coincidencias.length}</b> movimientos.
+      <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 8 }}>
+        Coinciden <b>{coincidencias.length}</b> movimientos · <b>{seleccionados.length}</b> seleccionados para mover.
       </div>
 
-      <button onClick={handleApply} disabled={coincidencias.length === 0 || applying} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
-        {applying ? "Aplicando..." : `Recategorizar ${coincidencias.length} movimientos`}
+      {coincidencias.length > 0 && (
+        <div style={{ maxHeight: 260, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, marginBottom: 14, border: "1px solid #f0ece0", borderRadius: 8, padding: 8 }}>
+          {coincidencias.map((e) => {
+            const excluido = excluidos.has(e.id);
+            return (
+              <label key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px", fontSize: 12.5, cursor: "pointer", opacity: excluido ? 0.4 : 1 }}>
+                <input type="checkbox" checked={!excluido} onChange={() => toggleExcluido(e.id)} style={{ flexShrink: 0 }} />
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {e.date} · {e.desc || "(sin descripción)"}{e.account ? ` · ${e.account}` : ""}
+                </span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0 }}>{fmtARS(e.amount)}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      <button onClick={handleApply} disabled={seleccionados.length === 0 || applying} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
+        {applying ? "Aplicando..." : `Recategorizar ${seleccionados.length} movimientos a "${hacia}"`}
       </button>
     </div>
   );
