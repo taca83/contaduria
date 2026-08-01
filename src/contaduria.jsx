@@ -112,7 +112,10 @@ async function cargarPdfjs() {
   // Usamos el build "legacy" de pdfjs-dist, pensado para navegadores que
   // no soportan bien todas las características modernas que usa el build
   // estándar (esto suele arreglar fallas puntuales en Safari/iOS).
-  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  // Nota: pdfjs-dist quedó fijado en 3.11.174 (ver mozilla/pdf.js#20479),
+  // versión anterior a que el paquete pasara a ser ESM-only, así que acá
+  // el archivo es "pdf.js" y no "pdf.mjs" como en versiones más nuevas.
+  const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.js");
   pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
   _pdfjsLibCache = pdfjsLib;
   return pdfjsLib;
