@@ -10,7 +10,7 @@ import {
   Home, List, Upload, Pencil, Check
 } from "lucide-react";
 
-const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Educación", "Ocio", "Cumpleaños", "Auto Citroen", "Auto DS", "Ropa", "Otros"];
+const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Comunicaciones", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Educación", "Ocio", "Cumpleaños", "Auto Citroen", "Auto DS", "Ropa", "Otros"];
 const TAB_LABELS = {
   resumen: "Resumen",
   movimientos: "Movimientos",
@@ -20,6 +20,7 @@ const TAB_LABELS = {
   duplicados: "Duplicados",
   recategorizar: "Recategorizar",
   divisas: "Divisas",
+  historial: "Historial de cambios",
 };
 const PRIMARY_TABS = [
   ["resumen", "Resumen", Home],
@@ -27,7 +28,7 @@ const PRIMARY_TABS = [
   ["presupuestos", "Presupuestos", Target],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["ahorros", "duplicados", "recategorizar", "divisas"];
+const SECONDARY_TABS = ["ahorros", "duplicados", "recategorizar", "divisas", "historial"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -43,8 +44,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v25 · 2026-07-31 · Importar con menú por método + parser de aranceles ORT
-const APP_VERSION = "v25 · 2026-07-31";
+// v27 · 2026-07-31 · categoría Comunicaciones + log de importaciones en Historial
+const APP_VERSION = "v27 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -486,24 +487,62 @@ export default function FinanzasApp() {
     await sb("entries", { method: "POST", body: JSON.stringify([entryToDb(full)]) });
   }
 
+  async function logAudit(accion, entrySnapshot, valorAnterior, valorNuevo) {
+    const row = {
+      id: uid(),
+      entry_id: entrySnapshot?.id || null,
+      accion,
+      valor_anterior: valorAnterior != null ? String(valorAnterior) : null,
+      valor_nuevo: valorNuevo != null ? String(valorNuevo) : null,
+      entry_snapshot: entrySnapshot || null,
+      who: profileName,
+    };
+    if (!HAS_SUPABASE) {
+      const log = safeGet("mock_audit_log") || [];
+      safeSet("mock_audit_log", [{ ...row, created_at: new Date().toISOString() }, ...log]);
+      return;
+    }
+    try {
+      await sb("audit_log", { method: "POST", body: JSON.stringify([row]) });
+    } catch (e) {
+      console.error("No se pudo guardar el historial", e);
+    }
+  }
+
   async function deleteEntry(id) {
+    const anterior = entries.find((e) => e.id === id);
     setEntries((prev) => {
       const next = prev.filter((e) => e.id !== id);
       if (!HAS_SUPABASE) mockSaveEntries(next);
       return next;
     });
+    await logAudit("delete", anterior, null, null);
     if (!HAS_SUPABASE) return;
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   async function editEntryDesc(id, nuevoDesc) {
+    const anterior = entries.find((e) => e.id === id);
     setEntries((prev) => {
       const next = prev.map((e) => e.id === id ? { ...e, desc: nuevoDesc } : e);
       if (!HAS_SUPABASE) mockSaveEntries(next);
       return next;
     });
+    await logAudit("edit_desc", anterior, anterior?.desc || "", nuevoDesc);
     if (!HAS_SUPABASE) return;
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ descripcion: nuevoDesc }) });
+  }
+
+  async function editEntryAmount(id, nuevoMonto) {
+    const anterior = entries.find((e) => e.id === id);
+    setEntries((prev) => {
+      const next = prev.map((e) => e.id === id ? { ...e, amount: nuevoMonto } : e);
+      if (!HAS_SUPABASE) mockSaveEntries(next);
+      return next;
+    });
+    await logAudit("edit_monto", anterior, anterior?.amount, nuevoMonto);
+    if (!HAS_SUPABASE) return;
+    await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ amount: nuevoMonto }) });
   }
 
   async function updateBudgets(next) {
@@ -800,7 +839,7 @@ export default function FinanzasApp() {
             />
           )}
           {tab === "movimientos" && (
-            <MovimientosTab allEntries={entries} entries={thisMonthEntries} onDelete={deleteEntry} onEditDesc={editEntryDesc} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
+            <MovimientosTab allEntries={entries} entries={thisMonthEntries} onDelete={deleteEntry} onEditDesc={editEntryDesc} onEditAmount={editEntryAmount} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
           )}
           {tab === "ahorros" && (
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
@@ -811,7 +850,7 @@ export default function FinanzasApp() {
           {tab === "importar" && (
             <ImportarTab
               categoryOverrides={categoryOverrides}
-              onImport={async (rows) => {
+              onImport={async (rows, formato) => {
                 const sig = (e) => `${e.date}|${Number(e.amount)}|${(e.desc || "").trim().toLowerCase()}|${(e.account || "").trim().toLowerCase()}`;
                 const existentes = new Set(entries.map(sig));
                 const vistosEnLote = new Set();
@@ -831,6 +870,12 @@ export default function FinanzasApp() {
                   if (!HAS_SUPABASE) mockSaveEntries(next);
                   return next;
                 });
+                await logAudit("import", {
+                  formato: formato || "?",
+                  cantidad_importada: nuevos.length,
+                  cantidad_duplicados: duplicados,
+                  cantidad_total: rows.length,
+                }, null, String(nuevos.length));
                 return { imported: nuevos.length, duplicates: duplicados };
               }}
             />
@@ -840,6 +885,9 @@ export default function FinanzasApp() {
           )}
           {tab === "divisas" && (
             <DivisasTab cambiosStats={cambiosStats} />
+          )}
+          {tab === "historial" && (
+            <HistorialTab />
           )}
           {tab === "recategorizar" && (
             <RecategorizarTab
@@ -1125,25 +1173,32 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   );
 }
 
-function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, profileName, monthLabel }) {
+function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmount, profileName, monthLabel }) {
   const [filter, setFilter] = useState("todos");
   const [busq, setBusq] = useState("");
   const [alcance, setAlcance] = useState("mes"); // "mes" | "historial"
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState("");
+  const [editAmount, setEditAmount] = useState("");
 
   function startEdit(e) {
     setEditingId(e.id);
     setEditText(e.desc || "");
+    setEditAmount(String(e.amount ?? ""));
   }
   function cancelEdit() {
     setEditingId(null);
     setEditText("");
+    setEditAmount("");
   }
-  async function saveEdit(id) {
-    await onEditDesc(id, editText.trim());
+  async function saveEdit(e) {
+    const nuevoTexto = editText.trim();
+    const nuevoMonto = Number(editAmount);
+    if (nuevoTexto !== (e.desc || "")) await onEditDesc(e.id, nuevoTexto);
+    if (nuevoMonto > 0 && nuevoMonto !== Number(e.amount)) await onEditAmount(e.id, nuevoMonto);
     setEditingId(null);
     setEditText("");
+    setEditAmount("");
   }
   const buscando = busq.trim().length > 0;
   const usaTodo = alcance === "historial";
@@ -1209,26 +1264,37 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, profileName
                   </div>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     {editing ? (
-                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <input
-                          autoFocus
-                          value={editText}
-                          onChange={(ev) => setEditText(ev.target.value)}
-                          onKeyDown={(ev) => { if (ev.key === "Enter") saveEdit(e.id); if (ev.key === "Escape") cancelEdit(); }}
-                          style={{ ...inputStyle, padding: "5px 8px", fontSize: 13 }}
-                        />
-                        <button onClick={() => saveEdit(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: GREEN, flexShrink: 0 }} aria-label="Guardar">
-                          <Check size={16} />
-                        </button>
-                        <button onClick={cancelEdit} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4", flexShrink: 0 }} aria-label="Cancelar">
-                          <X size={16} />
-                        </button>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <input
+                            autoFocus
+                            value={editText}
+                            onChange={(ev) => setEditText(ev.target.value)}
+                            onKeyDown={(ev) => { if (ev.key === "Enter") saveEdit(e); if (ev.key === "Escape") cancelEdit(); }}
+                            placeholder="Descripción"
+                            style={{ ...inputStyle, padding: "5px 8px", fontSize: 13, flex: 1 }}
+                          />
+                          <input
+                            type="number"
+                            value={editAmount}
+                            onChange={(ev) => setEditAmount(ev.target.value)}
+                            onKeyDown={(ev) => { if (ev.key === "Enter") saveEdit(e); if (ev.key === "Escape") cancelEdit(); }}
+                            placeholder="Monto"
+                            style={{ ...inputStyle, padding: "5px 8px", fontSize: 13, width: 110, fontFamily: "'IBM Plex Mono', monospace" }}
+                          />
+                          <button onClick={() => saveEdit(e)} style={{ border: "none", background: "none", cursor: "pointer", color: GREEN, flexShrink: 0 }} aria-label="Guardar">
+                            <Check size={16} />
+                          </button>
+                          <button onClick={cancelEdit} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4", flexShrink: 0 }} aria-label="Cancelar">
+                            <X size={16} />
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                         <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.category}{e.desc ? ` · ${e.desc}` : ""}</div>
                         {e.type !== "cambio" && (
-                          <button onClick={() => startEdit(e)} style={{ border: "none", background: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }} aria-label="Editar descripción">
+                          <button onClick={() => startEdit(e)} style={{ border: "none", background: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }} aria-label="Editar descripción y monto">
                             <Pencil size={13} />
                           </button>
                         )}
@@ -1492,7 +1558,8 @@ function ImportarTab({ onImport, categoryOverrides }) {
   async function handleImport() {
     if (!result || result.rows.length === 0) return;
     setImporting(true);
-    const res = await onImport(result.rows);
+    const formatoLabel = { bbva: "PDF BBVA", mercadopago: "PDF Mercado Pago", colegio: "PDF Colegio", csv: "CSV/texto" }[modo] || modo;
+    const res = await onImport(result.rows, formatoLabel);
     setImporting(false);
     setText("");
     setResult(null);
@@ -1669,6 +1736,67 @@ function ImportarTab({ onImport, categoryOverrides }) {
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HistorialTab() {
+  const [log, setLog] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      if (!HAS_SUPABASE) {
+        setLog(safeGet("mock_audit_log") || []);
+        return;
+      }
+      try {
+        const rows = await sb("audit_log?select=*&order=created_at.desc&limit=300");
+        setLog(rows || []);
+      } catch (e) {
+        console.error(e);
+        setLog([]);
+      }
+    })();
+  }, []);
+
+  return (
+    <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Historial de cambios</div>
+      <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
+        Ediciones de monto o descripción, y movimientos borrados — con su valor anterior para poder consultarlo.
+      </div>
+
+      {log === null ? (
+        <div style={{ fontSize: 13, color: "#8a9698" }}>Cargando...</div>
+      ) : log.length === 0 ? (
+        <EmptyState text="Todavía no hay cambios registrados." />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 480, overflowY: "auto" }}>
+          {log.map((r) => {
+            const snap = r.entry_snapshot || {};
+            let fechaCambio = "";
+            try { fechaCambio = new Date(r.created_at).toLocaleString("es-AR"); } catch {}
+            let texto;
+            if (r.accion === "delete") {
+              texto = `Borrado: ${snap.category || "(sin categoría)"} · ${snap.desc || "(sin descripción)"} · ${fmtARS(snap.amount || 0)} (${snap.date || "?"})`;
+            } else if (r.accion === "edit_monto") {
+              texto = `Monto editado: ${fmtARS(Number(r.valor_anterior) || 0)} → ${fmtARS(Number(r.valor_nuevo) || 0)} · ${snap.desc || snap.category || ""}`;
+            } else if (r.accion === "edit_desc") {
+              texto = `Descripción editada: "${r.valor_anterior || "(vacío)"}" → "${r.valor_nuevo || "(vacío)"}"`;
+            } else if (r.accion === "import") {
+              texto = `Importación (${snap.formato || "?"}): ${snap.cantidad_importada ?? 0} cargados de ${snap.cantidad_total ?? "?"}${snap.cantidad_duplicados ? `, ${snap.cantidad_duplicados} duplicados descartados` : ""}`;
+            } else {
+              texto = r.accion;
+            }
+            return (
+              <div key={r.id} style={{ padding: "9px 12px", borderRadius: 6, background: r.accion === "delete" ? "#f7e9e6" : r.accion === "import" ? "#e3eeee" : "#f2eee2", fontSize: 12.5 }}>
+                <div>{texto}</div>
+                <div style={{ fontSize: 11, color: "#9a9488", marginTop: 3 }}>{fechaCambio} · {r.who || "?"}</div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
