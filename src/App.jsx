@@ -6,7 +6,8 @@ import {
 } from "recharts";
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
-  ArrowUpRight, ArrowDownRight, Landmark, Settings, Trash2, User, Download, Menu
+  ArrowUpRight, ArrowDownRight, Landmark, Settings, Trash2, User, Download, Menu,
+  Home, List, Upload
 } from "lucide-react";
 
 const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Ocio", "Educación", "Ropa", "Otros"];
@@ -19,6 +20,13 @@ const TAB_LABELS = {
   duplicados: "Duplicados",
   recategorizar: "Recategorizar",
 };
+const PRIMARY_TABS = [
+  ["resumen", "Resumen", Home],
+  ["movimientos", "Movimientos", List],
+  ["presupuestos", "Presupuestos", Target],
+  ["importar", "Importar", Upload],
+];
+const SECONDARY_TABS = ["ahorros", "duplicados", "recategorizar"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -34,7 +42,7 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-const APP_VERSION = "v17 · 2026-07-31 · recategorizar con chips visuales y preview seleccionable";
+const APP_VERSION = "v20 · 2026-07-31 · botones grandes (Resumen/Movimientos/Presupuestos/Importar) + menú chico arriba a la derecha";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -596,7 +604,7 @@ export default function FinanzasApp() {
               </div>
             )}
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", position: "relative" }}>
             {config.names.map((n) => (
               <div key={n} title={n} style={{
                 width: 28, height: 28, borderRadius: "50%",
@@ -606,6 +614,38 @@ export default function FinanzasApp() {
                 fontSize: 12, fontWeight: 700
               }}>{n[0]?.toUpperCase()}</div>
             ))}
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              aria-label="Más opciones"
+              style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, width: 32, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: PAPER }}
+            >
+              <Menu size={16} />
+            </button>
+            {menuOpen && (
+              <>
+                <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 9 }} />
+                <div style={{
+                  position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 10, minWidth: 190,
+                  background: "#fff", borderRadius: 8, boxShadow: "0 8px 28px rgba(27,42,46,0.25)",
+                  border: "1px solid #ddd6c4", overflow: "hidden",
+                }}>
+                  {SECONDARY_TABS.map((key) => (
+                    <button
+                      key={key}
+                      onClick={() => { setTab(key); setMenuOpen(false); }}
+                      style={{
+                        display: "block", width: "100%", textAlign: "left", padding: "11px 16px",
+                        background: tab === key ? PAPER_DIM : "#fff", border: "none", borderBottom: "1px solid #f0ece0",
+                        cursor: "pointer", fontSize: 13.5, fontWeight: tab === key ? 700 : 500,
+                        color: tab === key ? TEAL : INK,
+                      }}
+                    >
+                      {TAB_LABELS[key]}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -627,53 +667,36 @@ export default function FinanzasApp() {
           </div>
         </div>
 
-        {/* Menú */}
-        <div style={{ position: "relative", marginTop: 22 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-            <button
-              onClick={() => setMenuOpen((v) => !v)}
-              style={{
-                display: "flex", alignItems: "center", gap: 8, background: "#fff",
-                border: `1px solid #ddd6c4`, borderRadius: 8, padding: "10px 14px",
-                cursor: "pointer", fontSize: 13.5, fontWeight: 700, color: INK, flex: 1,
-              }}
-            >
-              <Menu size={17} />
-              {TAB_LABELS[tab] || "Menú"}
-            </button>
+        {/* Secciones principales */}
+        <div style={{ marginTop: 22 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+            {PRIMARY_TABS.map(([key, label, Icon]) => (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                style={{
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+                  padding: "14px 6px", borderRadius: 10, cursor: "pointer",
+                  border: `1.5px solid ${tab === key ? TEAL : "#ddd6c4"}`,
+                  background: tab === key ? TEAL : "#fff",
+                  color: tab === key ? "#fff" : INK,
+                  boxShadow: tab === key ? "0 4px 14px rgba(15,110,110,0.25)" : "0 1px 4px rgba(27,42,46,0.06)",
+                }}
+              >
+                <Icon size={20} />
+                <span style={{ fontSize: 11.5, fontWeight: 700, textAlign: "center", lineHeight: 1.1 }}>{label}</span>
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
             <button
               onClick={exportarExcel}
               title="Exportar todos los movimientos a Excel"
-              style={{ ...btnOutline, padding: "8px 12px", fontSize: 12.5, flexShrink: 0 }}
+              style={{ ...btnOutline, padding: "8px 12px", fontSize: 12.5 }}
             >
               <Download size={15} /> Excel
             </button>
           </div>
-          {menuOpen && (
-            <>
-              <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 9 }} />
-              <div style={{
-                position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, zIndex: 10,
-                background: "#fff", borderRadius: 8, boxShadow: "0 8px 28px rgba(27,42,46,0.18)",
-                border: "1px solid #ddd6c4", overflow: "hidden",
-              }}>
-                {Object.entries(TAB_LABELS).map(([key, label]) => (
-                  <button
-                    key={key}
-                    onClick={() => { setTab(key); setMenuOpen(false); }}
-                    style={{
-                      display: "block", width: "100%", textAlign: "left", padding: "11px 16px",
-                      background: tab === key ? PAPER_DIM : "#fff", border: "none", borderBottom: "1px solid #f0ece0",
-                      cursor: "pointer", fontSize: 13.5, fontWeight: tab === key ? 700 : 500,
-                      color: tab === key ? TEAL : INK,
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
         </div>
 
         <div style={{ marginTop: 20 }}>
@@ -688,7 +711,7 @@ export default function FinanzasApp() {
             />
           )}
           {tab === "movimientos" && (
-            <MovimientosTab entries={thisMonthEntries} onDelete={deleteEntry} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
+            <MovimientosTab allEntries={entries} entries={thisMonthEntries} onDelete={deleteEntry} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
           )}
           {tab === "ahorros" && (
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
@@ -973,17 +996,38 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   );
 }
 
-function MovimientosTab({ entries, onDelete, profileName, monthLabel }) {
+function MovimientosTab({ entries, allEntries, onDelete, profileName, monthLabel }) {
   const [filter, setFilter] = useState("todos");
-  const filtered = entries.filter((e) => filter === "todos" ? (e.type === "gasto" || e.type === "ingreso") : e.type === filter);
+  const [busq, setBusq] = useState("");
+  const buscando = busq.trim().length > 0;
+
+  const base = buscando ? allEntries : entries;
+  const filtered = base.filter((e) => {
+    const pasaTipo = filter === "todos" ? (e.type === "gasto" || e.type === "ingreso") : e.type === filter;
+    if (!pasaTipo) return false;
+    if (!buscando) return true;
+    const q = busq.trim().toLowerCase();
+    return (
+      e.desc?.toLowerCase().includes(q) ||
+      e.category?.toLowerCase().includes(q) ||
+      e.account?.toLowerCase().includes(q) ||
+      e.who?.toLowerCase().includes(q)
+    );
+  }).sort((a, b) => (buscando ? (b.date || "").localeCompare(a.date || "") : 0));
 
   return (
     <div>
       {monthLabel && (
         <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 10, textTransform: "capitalize" }}>
-          Mostrando: <b>{monthLabel}</b>
+          {buscando ? <>Buscando en <b>todo el historial</b></> : <>Mostrando: <b>{monthLabel}</b></>}
         </div>
       )}
+      <input
+        value={busq}
+        onChange={(e) => setBusq(e.target.value)}
+        placeholder="Buscar por descripción, categoría, cuenta o quién lo cargó..."
+        style={{ ...inputStyle, marginBottom: 10 }}
+      />
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
         {[["todos", "Todos"], ["gasto", "Gastos"], ["ingreso", "Ingresos"], ["cambio", "Cambios USD"]].map(([k, l]) => (
           <button key={k} onClick={() => setFilter(k)} style={{
@@ -1447,7 +1491,7 @@ function RecategorizarTab({ entries, onApply }) {
   const [hacia, setHacia] = useState(GASTO_CATS[0]);
   const [busq, setBusq] = useState("");
   const [applying, setApplying] = useState(false);
-  const [excluidos, setExcluidos] = useState(new Set());
+  const [incluidos, setIncluidos] = useState(new Set());
 
   const coincidencias = useMemo(() => {
     return entries.filter((e) => {
@@ -1457,17 +1501,23 @@ function RecategorizarTab({ entries, onApply }) {
   }, [entries, desde, busq]);
 
   useEffect(() => {
-    setExcluidos(new Set());
+    setIncluidos(new Set());
   }, [desde, busq]);
 
-  const seleccionados = coincidencias.filter((e) => !excluidos.has(e.id));
+  const seleccionados = coincidencias.filter((e) => incluidos.has(e.id));
 
-  function toggleExcluido(id) {
-    setExcluidos((prev) => {
+  function toggleIncluido(id) {
+    setIncluidos((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
+  }
+  function seleccionarTodos() {
+    setIncluidos(new Set(coincidencias.map((e) => e.id)));
+  }
+  function deseleccionarTodos() {
+    setIncluidos(new Set());
   }
 
   async function handleApply() {
@@ -1475,7 +1525,7 @@ function RecategorizarTab({ entries, onApply }) {
     setApplying(true);
     await onApply(seleccionados.map((e) => e.id), hacia);
     setApplying(false);
-    setExcluidos(new Set());
+    setIncluidos(new Set());
   }
 
   return (
@@ -1498,17 +1548,23 @@ function RecategorizarTab({ entries, onApply }) {
       <label style={labelStyle}>Cambiar a</label>
       <CategoryChips selected={hacia} onSelect={setHacia} />
 
-      <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 8 }}>
-        Coinciden <b>{coincidencias.length}</b> movimientos · <b>{seleccionados.length}</b> seleccionados para mover.
+      <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+        <span>Coinciden <b>{coincidencias.length}</b> movimientos · <b>{seleccionados.length}</b> seleccionados para mover.</span>
+        {coincidencias.length > 0 && (
+          <span style={{ display: "flex", gap: 10 }}>
+            <button onClick={seleccionarTodos} style={{ background: "none", border: "none", color: TEAL, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>Seleccionar todos</button>
+            <button onClick={deseleccionarTodos} style={{ background: "none", border: "none", color: "#8a9698", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>Ninguno</button>
+          </span>
+        )}
       </div>
 
       {coincidencias.length > 0 && (
         <div style={{ maxHeight: 260, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, marginBottom: 14, border: "1px solid #f0ece0", borderRadius: 8, padding: 8 }}>
           {coincidencias.map((e) => {
-            const excluido = excluidos.has(e.id);
+            const incluido = incluidos.has(e.id);
             return (
-              <label key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px", fontSize: 12.5, cursor: "pointer", opacity: excluido ? 0.4 : 1 }}>
-                <input type="checkbox" checked={!excluido} onChange={() => toggleExcluido(e.id)} style={{ flexShrink: 0 }} />
+              <label key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px", fontSize: 12.5, cursor: "pointer", background: incluido ? "#e8f3ec" : "transparent", borderRadius: 6 }}>
+                <input type="checkbox" checked={incluido} onChange={() => toggleIncluido(e.id)} style={{ flexShrink: 0 }} />
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {e.date} · {e.desc || "(sin descripción)"}{e.account ? ` · ${e.account}` : ""}
                 </span>
