@@ -21,6 +21,8 @@ const TAB_LABELS = {
   recategorizar: "Recategorizar",
   divisas: "Divisas",
   historial: "Historial de cambios",
+  reset: "Reiniciar datos",
+  hogar: "Mi hogar",
 };
 const PRIMARY_TABS = [
   ["resumen", "Resumen", Home],
@@ -28,7 +30,7 @@ const PRIMARY_TABS = [
   ["presupuestos", "Presupuestos", Target],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["ahorros", "duplicados", "recategorizar", "divisas", "historial"];
+const SECONDARY_TABS = ["ahorros", "duplicados", "recategorizar", "divisas", "historial", "hogar", "reset"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -44,8 +46,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v38 · 2026-07-31 · editar y forzar carga de descartados por duplicado
-const APP_VERSION = "v38 · 2026-07-31";
+// v40 · 2026-07-31 · multi-hogar: login/registro real, datos aislados por hogar
+const APP_VERSION = "v40 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -346,12 +348,18 @@ function safeEnv() {
 const { url: SUPABASE_URL, key: SUPABASE_ANON_KEY } = safeEnv();
 const HAS_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY && !SUPABASE_URL.includes("%VITE_"));
 
+// El token de sesión del usuario logueado se guarda acá (fuera de React)
+// para que sb() lo use en cada request — necesario para que las políticas
+// de RLS por hogar (auth.uid()) funcionen.
+let _accessToken = null;
+function setAccessToken(token) { _accessToken = token; }
+
 async function sb(path, options = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...options,
     headers: {
       apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      Authorization: `Bearer ${_accessToken || SUPABASE_ANON_KEY}`,
       "Content-Type": "application/json",
       ...(options.headers || {}),
     },
@@ -362,6 +370,22 @@ async function sb(path, options = {}) {
   }
   if (res.status === 204) return null;
   return res.json().catch(() => null);
+}
+
+async function sbAuth(path, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(data?.msg || data?.error_description || data?.error || `Auth ${path} → ${res.status}`);
+  }
+  return data;
 }
 
 // Mapea una fila de la tabla `entries` (Supabase) al shape que usa la app
@@ -432,9 +456,9 @@ function mockSaveOverrides(overrides) { safeSet("mock_overrides", overrides); }
 
 export default function FinanzasApp() {
   const [loading, setLoading] = useState(true);
-  const [profileName, setProfileName] = useState(null);
-  const [nameInput, setNameInput] = useState("");
-  const [config, setConfig] = useState({ names: [] });
+  const [session, setSession] = useState(null); // { access_token, refresh_token, user }
+  const [householdId, setHouseholdId] = useState(null);
+  const [profileName, setProfileName] = useState(null); // display_name dentro del hogar
   const [entries, setEntries] = useState([]);
   const [budgets, setBudgets] = useState({});
   const [categoryOverrides, setCategoryOverrides] = useState({});
@@ -446,13 +470,48 @@ export default function FinanzasApp() {
 
   const [loadError, setLoadError] = useState(null);
 
+  // --- pantalla de login/registro ---
+  const [authMode, setAuthMode] = useState("login"); // "login" | "signup" | "onboarding"
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authDisplayName, setAuthDisplayName] = useState("");
+  const [authInviteCode, setAuthInviteCode] = useState("");
+  const [authHouseholdName, setAuthHouseholdName] = useState("");
+  const [authError, setAuthError] = useState(null);
+  const [authBusy, setAuthBusy] = useState(false);
+
+  async function cargarHogarYDatos(accessToken) {
+    setAccessToken(accessToken);
+    const miembro = await sb("household_members?select=household_id,display_name");
+    if (!miembro || miembro.length === 0) {
+      setAuthMode("onboarding");
+      setLoading(false);
+      return;
+    }
+    const hh = miembro[0];
+    setHouseholdId(hh.household_id);
+    setProfileName(hh.display_name);
+    const [entRows, budRows, ovrRows] = await Promise.all([
+      sb(`entries?household_id=eq.${hh.household_id}&select=*&order=date.desc`),
+      sb(`budgets?household_id=eq.${hh.household_id}&select=*`),
+      sb(`category_overrides?household_id=eq.${hh.household_id}&select=*`),
+    ]);
+    setEntries((entRows || []).map(entryFromDb));
+    const budObj = {};
+    (budRows || []).forEach((b) => { budObj[b.category] = Number(b.limit_amount); });
+    setBudgets(budObj);
+    const ovrObj = {};
+    (ovrRows || []).forEach((o) => { ovrObj[o.desc_key] = o.category; });
+    setCategoryOverrides(ovrObj);
+    setLoading(false);
+  }
+
   useEffect(() => {
     (async () => {
-      const prof = safeGet("profile");
-      if (prof?.name) setProfileName(prof.name);
       if (!HAS_SUPABASE) {
+        const prof = safeGet("profile");
+        if (prof?.name) setProfileName(prof.name);
         const mock = mockLoad();
-        setConfig({ names: mock.names });
         setEntries(mock.entries);
         setBudgets(mock.budgets);
         setCategoryOverrides(mock.overrides);
@@ -460,39 +519,106 @@ export default function FinanzasApp() {
         return;
       }
       try {
-        const [cfgRows, entRows, budRows, ovrRows] = await Promise.all([
-          sb("config?id=eq.1&select=names"),
-          sb("entries?select=*&order=date.desc"),
-          sb("budgets?select=*"),
-          sb("category_overrides?select=*"),
-        ]);
-        setConfig({ names: cfgRows?.[0]?.names || [] });
-        setEntries((entRows || []).map(entryFromDb));
-        const budObj = {};
-        (budRows || []).forEach((b) => { budObj[b.category] = Number(b.limit_amount); });
-        setBudgets(budObj);
-        const ovrObj = {};
-        (ovrRows || []).forEach((o) => { ovrObj[o.desc_key] = o.category; });
-        setCategoryOverrides(ovrObj);
+        const stored = safeGet("auth_session");
+        if (!stored?.access_token) {
+          setLoading(false);
+          return;
+        }
+        setSession(stored);
+        await cargarHogarYDatos(stored.access_token);
       } catch (e) {
         console.error(e);
-        setLoadError(`No se pudo conectar con la base de datos.\n\nDetalle técnico: ${e.message}`);
+        // token vencido u otro problema — pedimos login de nuevo
+        safeSet("auth_session", null);
+        setSession(null);
+        setLoading(false);
       }
-      setLoading(false);
     })();
   }, []);
 
-  async function chooseName(name) {
-    const clean = name.trim();
-    if (!clean) return;
-    setProfileName(clean);
-    safeSet("profile", { name: clean });
-    if (!config.names.includes(clean)) {
-      const next = { names: [...config.names, clean] };
-      setConfig(next);
-      if (!HAS_SUPABASE) { mockSaveNames(next.names); return; }
-      await sb("config?id=eq.1", { method: "PATCH", body: JSON.stringify({ names: next.names }) });
+  async function handleSignup() {
+    setAuthError(null);
+    setAuthBusy(true);
+    try {
+      const data = await sbAuth("signup", {
+        method: "POST",
+        body: JSON.stringify({ email: authEmail.trim(), password: authPassword }),
+      });
+      if (!data.access_token) {
+        setAuthError("Cuenta creada. Revisá tu email para confirmarla y después iniciá sesión.");
+        setAuthBusy(false);
+        return;
+      }
+      safeSet("auth_session", data);
+      setSession(data);
+      setAccessToken(data.access_token);
+      if (authInviteCode.trim()) {
+        await sb("rpc/join_household_by_code", {
+          method: "POST",
+          body: JSON.stringify({ p_code: authInviteCode.trim(), p_display_name: authDisplayName.trim() || "Yo" }),
+        });
+      } else {
+        await sb("rpc/create_household", {
+          method: "POST",
+          body: JSON.stringify({ p_name: authHouseholdName.trim() || "Mi hogar", p_display_name: authDisplayName.trim() || "Yo" }),
+        });
+      }
+      await cargarHogarYDatos(data.access_token);
+    } catch (e) {
+      setAuthError(e.message);
     }
+    setAuthBusy(false);
+  }
+
+  async function handleLogin() {
+    setAuthError(null);
+    setAuthBusy(true);
+    try {
+      const data = await sbAuth("token?grant_type=password", {
+        method: "POST",
+        body: JSON.stringify({ email: authEmail.trim(), password: authPassword }),
+      });
+      safeSet("auth_session", data);
+      setSession(data);
+      await cargarHogarYDatos(data.access_token);
+    } catch (e) {
+      setAuthError(e.message);
+    }
+    setAuthBusy(false);
+  }
+
+  async function handleJoinOrCreateHousehold() {
+    setAuthError(null);
+    setAuthBusy(true);
+    try {
+      if (authInviteCode.trim()) {
+        await sb("rpc/join_household_by_code", {
+          method: "POST",
+          body: JSON.stringify({ p_code: authInviteCode.trim(), p_display_name: authDisplayName.trim() || "Yo" }),
+        });
+      } else {
+        await sb("rpc/create_household", {
+          method: "POST",
+          body: JSON.stringify({ p_name: authHouseholdName.trim() || "Mi hogar", p_display_name: authDisplayName.trim() || "Yo" }),
+        });
+      }
+      await cargarHogarYDatos(session.access_token);
+    } catch (e) {
+      setAuthError(e.message);
+    }
+    setAuthBusy(false);
+  }
+
+  function handleLogout() {
+    safeSet("auth_session", null);
+    setAccessToken(null);
+    setSession(null);
+    setHouseholdId(null);
+    setProfileName(null);
+    setEntries([]);
+    setBudgets({});
+    setCategoryOverrides({});
+    setAuthMode("login");
   }
 
   async function addEntry(entry) {
@@ -503,7 +629,7 @@ export default function FinanzasApp() {
       return next;
     });
     if (!HAS_SUPABASE) return;
-    await sb("entries", { method: "POST", body: JSON.stringify([entryToDb(full)]) });
+    await sb("entries", { method: "POST", body: JSON.stringify([{ ...entryToDb(full), household_id: householdId }]) });
   }
 
   async function logAudit(accion, entrySnapshot, valorAnterior, valorNuevo) {
@@ -515,6 +641,7 @@ export default function FinanzasApp() {
       valor_nuevo: valorNuevo != null ? String(valorNuevo) : null,
       entry_snapshot: entrySnapshot || null,
       who: profileName,
+      household_id: householdId,
     };
     if (!HAS_SUPABASE) {
       const log = safeGet("mock_audit_log") || [];
@@ -564,10 +691,29 @@ export default function FinanzasApp() {
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ amount: nuevoMonto }) });
   }
 
+  async function resetearTodo() {
+    setEntries([]);
+    setBudgets({});
+    setCategoryOverrides({});
+    if (!HAS_SUPABASE) {
+      mockSaveEntries([]);
+      mockSaveBudgets({});
+      mockSaveOverrides({});
+      safeSet("mock_audit_log", []);
+      return;
+    }
+    await Promise.all([
+      sb("entries?id=not.is.null", { method: "DELETE" }),
+      sb("budgets?category=not.is.null", { method: "DELETE" }),
+      sb("category_overrides?desc_key=not.is.null", { method: "DELETE" }),
+      sb("audit_log?id=not.is.null", { method: "DELETE" }),
+    ]);
+  }
+
   async function updateBudgets(next) {
     setBudgets(next);
     if (!HAS_SUPABASE) { mockSaveBudgets(next); return; }
-    const rows = Object.entries(next).map(([category, limit_amount]) => ({ category, limit_amount: Number(limit_amount) }));
+    const rows = Object.entries(next).map(([category, limit_amount]) => ({ category, limit_amount: Number(limit_amount), household_id: householdId }));
     if (rows.length > 0) {
       await sb("budgets", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
     }
@@ -684,30 +830,101 @@ export default function FinanzasApp() {
   }
 
   if (!profileName) {
+    // --- Modo local (preview sin Supabase): mantenemos el selector simple ---
+    if (!HAS_SUPABASE) {
+      return (
+        <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
+          <style>{fontImports}</style>
+          <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 380, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
+            <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 24 }}>Vista previa local. Decinos quién sos para empezar.</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                value={authDisplayName}
+                onChange={(e) => setAuthDisplayName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && authDisplayName.trim() && (safeSet("profile", { name: authDisplayName.trim() }), setProfileName(authDisplayName.trim()))}
+                placeholder="Ej: Juan"
+                style={inputStyle}
+              />
+              <button onClick={() => { if (authDisplayName.trim()) { safeSet("profile", { name: authDisplayName.trim() }); setProfileName(authDisplayName.trim()); } }} style={btnPrimary}>Entrar</button>
+            </div>
+            <div style={{ fontSize: 11, color: GOLD, marginTop: 12, textAlign: "right" }}>⚠ Vista previa local — sin conexión a Supabase (normal en Claude)</div>
+            <div style={{ fontSize: 10, color: "#c4bda8", marginTop: 18, textAlign: "right" }}>{APP_VERSION}</div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- Onboarding: ya hay sesión pero falta crear/sumarse a un hogar ---
+    if (authMode === "onboarding" && session) {
+      return (
+        <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
+          <style>{fontImports}</style>
+          <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 400, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: INK, marginBottom: 6 }}>Un paso más</div>
+            <div style={{ color: "#5a6b6d", fontSize: 13.5, marginBottom: 20 }}>
+              Creá tu hogar, o sumate a uno existente con un código de invitación.
+            </div>
+            <label style={labelStyle}>Tu nombre (como te van a ver los demás)</label>
+            <input value={authDisplayName} onChange={(e) => setAuthDisplayName(e.target.value)} placeholder="Ej: Juan" style={{ ...inputStyle, marginBottom: 14 }} />
+            <label style={labelStyle}>Código de invitación (si te sumás a un hogar existente)</label>
+            <input value={authInviteCode} onChange={(e) => setAuthInviteCode(e.target.value)} placeholder="Dejalo vacío para crear un hogar nuevo" style={{ ...inputStyle, marginBottom: 14 }} />
+            {!authInviteCode.trim() && (
+              <>
+                <label style={labelStyle}>Nombre del hogar</label>
+                <input value={authHouseholdName} onChange={(e) => setAuthHouseholdName(e.target.value)} placeholder="Ej: Familia Israel" style={{ ...inputStyle, marginBottom: 14 }} />
+              </>
+            )}
+            {authError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 12 }}>{authError}</div>}
+            <button onClick={handleJoinOrCreateHousehold} disabled={authBusy} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
+              {authBusy ? "Un momento..." : (authInviteCode.trim() ? "Sumarme al hogar" : "Crear mi hogar")}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // --- Login / registro ---
     return (
       <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
         <style>{fontImports}</style>
-        <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 380, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
+        <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 400, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
-          <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 24 }}>Finanzas compartidas. Decinos quién sos para empezar.</div>
-          <div style={{ fontSize: 12, color: "#8a8f5c", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
-            Tu nombre
+          <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 20 }}>
+            {authMode === "signup" ? "Creá tu cuenta para empezar." : "Iniciá sesión para continuar."}
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              value={nameInput}
-              onChange={(e) => setNameInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && chooseName(nameInput)}
-              placeholder="Ej: Juan"
-              style={inputStyle}
-            />
-            <button onClick={() => chooseName(nameInput)} style={btnPrimary}>Entrar</button>
-          </div>
-          {!HAS_SUPABASE && (
-            <div style={{ fontSize: 11, color: GOLD, marginTop: 12, textAlign: "right" }}>
-              ⚠ Vista previa local — sin conexión a Supabase (normal en Claude)
-            </div>
+
+          <label style={labelStyle}>Email</label>
+          <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="vos@ejemplo.com" style={{ ...inputStyle, marginBottom: 14 }} />
+          <label style={labelStyle}>Contraseña</label>
+          <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="••••••••" style={{ ...inputStyle, marginBottom: 14 }} />
+
+          {authMode === "signup" && (
+            <>
+              <label style={labelStyle}>Tu nombre</label>
+              <input value={authDisplayName} onChange={(e) => setAuthDisplayName(e.target.value)} placeholder="Ej: Juan" style={{ ...inputStyle, marginBottom: 14 }} />
+              <label style={labelStyle}>Código de invitación (opcional, si te suma a un hogar existente)</label>
+              <input value={authInviteCode} onChange={(e) => setAuthInviteCode(e.target.value)} placeholder="Dejalo vacío para crear tu propio hogar" style={{ ...inputStyle, marginBottom: 14 }} />
+              {!authInviteCode.trim() && (
+                <>
+                  <label style={labelStyle}>Nombre del hogar</label>
+                  <input value={authHouseholdName} onChange={(e) => setAuthHouseholdName(e.target.value)} placeholder="Ej: Familia Israel" style={{ ...inputStyle, marginBottom: 14 }} />
+                </>
+              )}
+            </>
           )}
+
+          {authError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 12 }}>{authError}</div>}
+
+          <button onClick={authMode === "signup" ? handleSignup : handleLogin} disabled={authBusy} style={{ ...btnPrimary, width: "100%", justifyContent: "center", marginBottom: 12 }}>
+            {authBusy ? "Un momento..." : (authMode === "signup" ? "Crear cuenta" : "Iniciar sesión")}
+          </button>
+          <button
+            onClick={() => { setAuthMode(authMode === "signup" ? "login" : "signup"); setAuthError(null); }}
+            style={{ background: "none", border: "none", color: TEAL, fontSize: 13, cursor: "pointer", width: "100%" }}
+          >
+            {authMode === "signup" ? "¿Ya tenés cuenta? Iniciá sesión" : "¿No tenés cuenta? Creá una"}
+          </button>
           <div style={{ fontSize: 10, color: "#c4bda8", marginTop: 18, textAlign: "right" }}>{APP_VERSION}</div>
         </div>
       </div>
@@ -752,15 +969,12 @@ export default function FinanzasApp() {
             )}
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center", position: "relative" }}>
-            {config.names.map((n) => (
-              <div key={n} title={n} style={{
-                width: 28, height: 28, borderRadius: "50%",
-                background: n === profileName ? GOLD : "#33474a",
-                color: n === profileName ? INK : PAPER,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 12, fontWeight: 700
-              }}>{n[0]?.toUpperCase()}</div>
-            ))}
+            <div title={profileName} style={{
+              width: 28, height: 28, borderRadius: "50%",
+              background: GOLD, color: INK,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 12, fontWeight: 700
+            }}>{profileName?.[0]?.toUpperCase()}</div>
             <button
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="Más opciones"
@@ -900,7 +1114,7 @@ export default function FinanzasApp() {
                   nuevos.push({ ...r, id: uid(), who: r.who || profileName });
                 });
                 if (HAS_SUPABASE && nuevos.length > 0) {
-                  await sb("entries", { method: "POST", body: JSON.stringify(nuevos.map(entryToDb)) });
+                  await sb("entries", { method: "POST", body: JSON.stringify(nuevos.map((n) => ({ ...entryToDb(n), household_id: householdId }))) });
                 }
                 setEntries((prev) => {
                   const next = [...nuevos, ...prev];
@@ -926,6 +1140,12 @@ export default function FinanzasApp() {
           )}
           {tab === "historial" && (
             <HistorialTab />
+          )}
+          {tab === "reset" && (
+            <ResetTab onReset={resetearTodo} />
+          )}
+          {tab === "hogar" && (
+            <HogarTab householdId={householdId} onLogout={handleLogout} />
           )}
           {tab === "recategorizar" && (
             <RecategorizarTab
@@ -963,7 +1183,7 @@ export default function FinanzasApp() {
                     })
                   )
                 );
-                const rows = [...keysAfectadas].filter(Boolean).map((k) => ({ desc_key: k, category: nuevaCategoria }));
+                const rows = [...keysAfectadas].filter(Boolean).map((k) => ({ desc_key: k, category: nuevaCategoria, household_id: householdId }));
                 if (rows.length > 0) {
                   await sb("category_overrides", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
                 }
@@ -1809,6 +2029,122 @@ function ImportarTab({ onImport, categoryOverrides }) {
             ))}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function HogarTab({ householdId, onLogout }) {
+  const [hh, setHh] = useState(null);
+  const [miembros, setMiembros] = useState(null);
+  const [copiado, setCopiado] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      if (!HAS_SUPABASE) return;
+      try {
+        const [hhRows, memRows] = await Promise.all([
+          sb(`households?id=eq.${householdId}&select=*`),
+          sb(`household_members?household_id=eq.${householdId}&select=display_name,role`),
+        ]);
+        setHh(hhRows?.[0] || null);
+        setMiembros(memRows || []);
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+  }, [householdId]);
+
+  function copiarCodigo() {
+    if (!hh?.invite_code) return;
+    navigator.clipboard?.writeText(hh.invite_code);
+    setCopiado(true);
+    setTimeout(() => setCopiado(false), 2000);
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Mi hogar</div>
+        {!HAS_SUPABASE ? (
+          <EmptyState text="No aplica en vista previa local." />
+        ) : !hh ? (
+          <div style={{ fontSize: 13, color: "#8a9698" }}>Cargando...</div>
+        ) : (
+          <>
+            <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 4 }}>{hh.name}</div>
+            <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 6 }}>
+              Compartí este código con quien quieras sumar a tu hogar (van a ver y editar los mismos datos que vos):
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 20, fontWeight: 700, background: PAPER_DIM, padding: "8px 14px", borderRadius: 8, letterSpacing: 2 }}>
+                {hh.invite_code}
+              </div>
+              <button onClick={copiarCodigo} style={btnOutline}>{copiado ? "¡Copiado!" : "Copiar"}</button>
+            </div>
+            {miembros && miembros.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Miembros</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {miembros.map((m, i) => (
+                    <div key={i} style={{ fontSize: 13 }}>{m.display_name} {m.role === "owner" ? "· dueño/a" : ""}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      <button onClick={onLogout} style={{ ...btnOutline, color: BRICK, borderColor: BRICK, justifyContent: "center" }}>
+        Cerrar sesión
+      </button>
+    </div>
+  );
+}
+
+function ResetTab({ onReset }) {
+  const [confirmText, setConfirmText] = useState("");
+  const [resetting, setResetting] = useState(false);
+  const [done, setDone] = useState(false);
+  const FRASE = "BORRAR TODO";
+
+  async function handleReset() {
+    setResetting(true);
+    await onReset();
+    setResetting(false);
+    setDone(true);
+    setConfirmText("");
+  }
+
+  return (
+    <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6, color: BRICK }}>Reiniciar datos</div>
+      <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
+        Pensado para esta etapa de pruebas. Esto borra <b>TODOS</b> los movimientos, presupuestos, reglas de categorización aprendidas, y el historial de cambios — de forma permanente, sin poder deshacerlo. No borra tu perfil ni los nombres guardados.
+      </div>
+
+      {done ? (
+        <div style={{ background: "#e8f3ec", border: `1px solid ${GREEN}`, borderRadius: 8, padding: 12, fontSize: 13 }}>
+          Listo, se borró todo. La app queda como recién instalada.
+        </div>
+      ) : (
+        <>
+          <label style={labelStyle}>Para confirmar, escribí exactamente: <b>{FRASE}</b></label>
+          <input
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder={FRASE}
+            style={{ ...inputStyle, marginBottom: 14 }}
+          />
+          <button
+            onClick={handleReset}
+            disabled={confirmText.trim().toUpperCase() !== FRASE || resetting}
+            style={{ ...btnPrimary, background: BRICK, width: "100%", justifyContent: "center" }}
+          >
+            {resetting ? "Borrando todo..." : "Borrar todos los datos"}
+          </button>
+        </>
       )}
     </div>
   );
