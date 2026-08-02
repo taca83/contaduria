@@ -10,7 +10,7 @@ import {
   Home, List, Upload, Pencil, Check
 } from "lucide-react";
 
-const GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Comunicaciones", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Educación", "Ocio", "Cumpleaños", "Auto Citroen", "Auto DS", "Ropa", "Otros"];
+const DEFAULT_GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Comunicaciones", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Educación", "Ocio", "Cumpleaños", "Auto Citroen", "Auto DS", "Ropa", "Otros"];
 const TAB_LABELS = {
   resumen: "Resumen",
   movimientos: "Movimientos",
@@ -23,6 +23,7 @@ const TAB_LABELS = {
   historial: "Historial de cambios",
   reset: "Reiniciar datos",
   hogar: "Mi hogar",
+  categorias: "Categorías",
 };
 const PRIMARY_TABS = [
   ["resumen", "Resumen", Home],
@@ -30,7 +31,7 @@ const PRIMARY_TABS = [
   ["presupuestos", "Presupuestos", Target],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["hogar", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
+const SECONDARY_TABS = ["hogar", "categorias", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -46,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v44 · 2026-07-31 · invitación al hogar por link/WhatsApp + QR
-const APP_VERSION = "v44 · 2026-07-31";
+// v45 · 2026-07-31 · CRUD de categorías (agregar/renombrar/borrar) por hogar
+const APP_VERSION = "v45 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -447,9 +448,11 @@ function mockLoad() {
     budgets: safeGet("mock_budgets") || {},
     names: safeGet("mock_names") || [],
     overrides: safeGet("mock_overrides") || {},
+    categories: safeGet("mock_categories") || DEFAULT_GASTO_CATS,
   };
 }
 function mockSaveEntries(entries) { safeSet("mock_entries", entries); }
+function mockSaveCategories(categories) { safeSet("mock_categories", categories); }
 function mockSaveBudgets(budgets) { safeSet("mock_budgets", budgets); }
 function mockSaveNames(names) { safeSet("mock_names", names); }
 function mockSaveOverrides(overrides) { safeSet("mock_overrides", overrides); }
@@ -462,6 +465,7 @@ export default function FinanzasApp() {
   const [entries, setEntries] = useState([]);
   const [budgets, setBudgets] = useState({});
   const [categoryOverrides, setCategoryOverrides] = useState({});
+  const [categories, setCategories] = useState(DEFAULT_GASTO_CATS);
   const [tab, setTab] = useState("resumen");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -497,10 +501,11 @@ export default function FinanzasApp() {
     const hh = miembro[0];
     setHouseholdId(hh.household_id);
     setProfileName(hh.display_name);
-    const [entRows, budRows, ovrRows] = await Promise.all([
+    const [entRows, budRows, ovrRows, catRows] = await Promise.all([
       sb(`entries?household_id=eq.${hh.household_id}&select=*&order=date.desc`),
       sb(`budgets?household_id=eq.${hh.household_id}&select=*`),
       sb(`category_overrides?household_id=eq.${hh.household_id}&select=*`),
+      sb(`categories?household_id=eq.${hh.household_id}&select=name&order=name.asc`),
     ]);
     setEntries((entRows || []).map(entryFromDb));
     const budObj = {};
@@ -509,6 +514,7 @@ export default function FinanzasApp() {
     const ovrObj = {};
     (ovrRows || []).forEach((o) => { ovrObj[o.desc_key] = o.category; });
     setCategoryOverrides(ovrObj);
+    setCategories((catRows || []).map((c) => c.name).length > 0 ? catRows.map((c) => c.name) : DEFAULT_GASTO_CATS);
     setTab("resumen");
     setLoading(false);
   }
@@ -522,6 +528,7 @@ export default function FinanzasApp() {
         setEntries(mock.entries);
         setBudgets(mock.budgets);
         setCategoryOverrides(mock.overrides);
+        setCategories(mock.categories);
         setLoading(false);
         return;
       }
@@ -696,6 +703,66 @@ export default function FinanzasApp() {
     await logAudit("edit_monto", anterior, anterior?.amount, nuevoMonto);
     if (!HAS_SUPABASE) return;
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ amount: nuevoMonto }) });
+  }
+
+  async function addCategory(nombre) {
+    const limpio = nombre.trim();
+    if (!limpio || categories.includes(limpio)) return { ok: false, error: "Nombre vacío o ya existe." };
+    const next = [...categories, limpio].sort();
+    setCategories(next);
+    if (!HAS_SUPABASE) { mockSaveCategories(next); return { ok: true }; }
+    await sb("categories", { method: "POST", body: JSON.stringify([{ household_id: householdId, name: limpio }]) });
+    return { ok: true };
+  }
+
+  function contarUsos(nombreCategoria) {
+    return entries.filter((e) => e.category === nombreCategoria).length
+      + Object.keys(budgets).filter((c) => c === nombreCategoria).length;
+  }
+
+  async function renameCategory(viejo, nuevo) {
+    const limpio = nuevo.trim();
+    if (!limpio || limpio === viejo) return { ok: false, error: "Nombre inválido." };
+    if (categories.includes(limpio)) return { ok: false, error: "Ya existe una categoría con ese nombre." };
+    // Renombra la categoría y todo lo que la referencia (movimientos,
+    // presupuesto, reglas aprendidas) para no dejar nada huérfano.
+    const nextEntries = entries.map((e) => e.category === viejo ? { ...e, category: limpio } : e);
+    setEntries(nextEntries);
+    const nextBudgets = { ...budgets };
+    if (nextBudgets[viejo] != null) { nextBudgets[limpio] = nextBudgets[viejo]; delete nextBudgets[viejo]; }
+    setBudgets(nextBudgets);
+    const nextOverrides = { ...categoryOverrides };
+    Object.keys(nextOverrides).forEach((k) => { if (nextOverrides[k] === viejo) nextOverrides[k] = limpio; });
+    setCategoryOverrides(nextOverrides);
+    const nextCats = categories.map((c) => c === viejo ? limpio : c).sort();
+    setCategories(nextCats);
+
+    if (!HAS_SUPABASE) {
+      mockSaveEntries(nextEntries);
+      mockSaveBudgets(nextBudgets);
+      mockSaveOverrides(nextOverrides);
+      mockSaveCategories(nextCats);
+      return { ok: true };
+    }
+    await Promise.all([
+      sb(`entries?household_id=eq.${householdId}&category=eq.${encodeURIComponent(viejo)}`, { method: "PATCH", body: JSON.stringify({ category: limpio }) }),
+      sb(`budgets?household_id=eq.${householdId}&category=eq.${encodeURIComponent(viejo)}`, { method: "PATCH", body: JSON.stringify({ category: limpio }) }),
+      sb(`category_overrides?household_id=eq.${householdId}&category=eq.${encodeURIComponent(viejo)}`, { method: "PATCH", body: JSON.stringify({ category: limpio }) }),
+      sb(`categories?household_id=eq.${householdId}&name=eq.${encodeURIComponent(viejo)}`, { method: "PATCH", body: JSON.stringify({ name: limpio }) }),
+    ]);
+    return { ok: true };
+  }
+
+  async function deleteCategory(nombre) {
+    const usos = contarUsos(nombre);
+    if (usos > 0) {
+      return { ok: false, error: `Hay ${usos} movimiento(s) usando "${nombre}" — recategorizalos primero.` };
+    }
+    const next = categories.filter((c) => c !== nombre);
+    setCategories(next);
+    if (!HAS_SUPABASE) { mockSaveCategories(next); return { ok: true }; }
+    await sb(`categories?household_id=eq.${householdId}&name=eq.${encodeURIComponent(nombre)}`, { method: "DELETE" });
+    return { ok: true };
   }
 
   async function resetearTodo() {
@@ -1100,7 +1167,7 @@ export default function FinanzasApp() {
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
           )}
           {tab === "presupuestos" && (
-            <PresupuestosTab budgets={budgets} onUpdate={updateBudgets} gastosPorCategoria={gastosPorCategoria} />
+            <PresupuestosTab budgets={budgets} onUpdate={updateBudgets} gastosPorCategoria={gastosPorCategoria} categories={categories} />
           )}
           {tab === "importar" && (
             <ImportarTab
@@ -1154,8 +1221,12 @@ export default function FinanzasApp() {
           {tab === "hogar" && (
             <HogarTab householdId={householdId} onLogout={handleLogout} />
           )}
+          {tab === "categorias" && (
+            <CategoriasTab categories={categories} contarUsos={contarUsos} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory} />
+          )}
           {tab === "recategorizar" && (
             <RecategorizarTab
+              categories={categories}
               entries={entries}
               onApply={async (ids, nuevaCategoria) => {
                 const idSet = new Set(ids);
@@ -1218,6 +1289,7 @@ export default function FinanzasApp() {
           onClose={() => setShowForm(false)}
           onSave={async (entry) => { setSaving(true); await addEntry(entry); setSaving(false); setShowForm(false); }}
           saving={saving}
+          categories={categories}
         />
       )}
     </div>
@@ -1669,7 +1741,7 @@ function AhorrosTab({ entries, onDelete, totalAhorradoHistorico }) {
   );
 }
 
-function PresupuestosTab({ budgets, onUpdate, gastosPorCategoria }) {
+function PresupuestosTab({ budgets, onUpdate, gastosPorCategoria, categories }) {
   const [local, setLocal] = useState(budgets);
   useEffect(() => setLocal(budgets), [budgets]);
 
@@ -1684,7 +1756,7 @@ function PresupuestosTab({ budgets, onUpdate, gastosPorCategoria }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 4 }}>Definí un tope mensual por categoría. Se compara contra lo gastado este mes.</div>
-      {GASTO_CATS.map((cat) => {
+      {categories.map((cat) => {
         const limit = Number(local[cat]) || 0;
         const spent = gastoMap[cat] || 0;
         const pct = limit > 0 ? Math.min(100, (spent / limit) * 100) : 0;
@@ -2151,6 +2223,101 @@ function HogarTab({ householdId, onLogout }) {
   );
 }
 
+function CategoriasTab({ categories, contarUsos, onAdd, onRename, onDelete }) {
+  const [nuevoNombre, setNuevoNombre] = useState("");
+  const [addError, setAddError] = useState(null);
+  const [editKey, setEditKey] = useState(null);
+  const [editValue, setEditValue] = useState("");
+  const [busy, setBusy] = useState(null);
+  const [deleteError, setDeleteError] = useState({});
+
+  async function handleAdd() {
+    setAddError(null);
+    const res = await onAdd(nuevoNombre);
+    if (!res.ok) { setAddError(res.error); return; }
+    setNuevoNombre("");
+  }
+
+  function startEdit(cat) {
+    setEditKey(cat);
+    setEditValue(cat);
+  }
+  function cancelEdit() {
+    setEditKey(null);
+    setEditValue("");
+  }
+  async function saveRename(viejo) {
+    setBusy(viejo);
+    const res = await onRename(viejo, editValue);
+    setBusy(null);
+    if (res.ok) { setEditKey(null); setEditValue(""); }
+    else setAddError(res.error);
+  }
+  async function handleDelete(cat) {
+    setBusy(cat);
+    setDeleteError((prev) => ({ ...prev, [cat]: null }));
+    const res = await onDelete(cat);
+    setBusy(null);
+    if (!res.ok) setDeleteError((prev) => ({ ...prev, [cat]: res.error }));
+  }
+
+  return (
+    <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Categorías</div>
+      <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
+        Agregá, renombrá o borrá categorías. Para borrar una que ya tiene gastos cargados, primero hay que recategorizar todo lo que la usa (pestaña Recategorizar).
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <input
+          value={nuevoNombre}
+          onChange={(e) => setNuevoNombre(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+          placeholder="Nueva categoría, ej: Mascotas"
+          style={{ ...inputStyle, flex: 1 }}
+        />
+        <button onClick={handleAdd} style={btnPrimary}><Plus size={16} /> Agregar</button>
+      </div>
+      {addError && <div style={{ color: BRICK, fontSize: 12, marginBottom: 14 }}>{addError}</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+        {categories.map((cat) => {
+          const usos = contarUsos(cat);
+          const editing = editKey === cat;
+          return (
+            <div key={cat} style={{ background: PAPER_DIM, borderRadius: 8, padding: "8px 10px" }}>
+              {editing ? (
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    autoFocus
+                    value={editValue}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveRename(cat); if (e.key === "Escape") cancelEdit(); }}
+                    style={{ ...inputStyle, padding: "5px 8px", fontSize: 13, flex: 1 }}
+                  />
+                  <button onClick={() => saveRename(cat)} disabled={busy === cat} style={{ border: "none", background: "none", cursor: "pointer", color: GREEN }}><Check size={16} /></button>
+                  <button onClick={cancelEdit} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4" }}><X size={16} /></button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+                    {cat} <span style={{ fontSize: 11, color: "#8a9698", fontWeight: 400 }}>({usos} movimiento{usos !== 1 ? "s" : ""})</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+                    <button onClick={() => startEdit(cat)} style={{ border: "none", background: "none", cursor: "pointer", color: TEAL }} aria-label="Renombrar"><Pencil size={14} /></button>
+                    <button onClick={() => handleDelete(cat)} disabled={busy === cat} style={{ border: "none", background: "none", cursor: "pointer", color: BRICK }} aria-label="Borrar"><Trash2 size={14} /></button>
+                  </div>
+                </div>
+              )}
+              {deleteError[cat] && <div style={{ color: BRICK, fontSize: 11.5, marginTop: 6 }}>{deleteError[cat]}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ResetTab({ onReset }) {
   const [confirmText, setConfirmText] = useState("");
   const [resetting, setResetting] = useState(false);
@@ -2445,11 +2612,11 @@ function DuplicadosTab({ entries, onDelete, onForceAdd }) {
   );
 }
 
-function CategoryChips({ selected, onSelect, cats = GASTO_CATS }) {
+function CategoryChips({ selected, onSelect, cats }) {
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
       {cats.map((c) => {
-        const i = GASTO_CATS.indexOf(c);
+        const i = cats.indexOf(c);
         const color = CAT_COLORS[(i >= 0 ? i : 0) % CAT_COLORS.length];
         const active = selected === c;
         return (
@@ -2471,9 +2638,9 @@ function CategoryChips({ selected, onSelect, cats = GASTO_CATS }) {
   );
 }
 
-function RecategorizarTab({ entries, onApply }) {
-  const [desde, setDesde] = useState(GASTO_CATS[0]);
-  const [hacia, setHacia] = useState(GASTO_CATS[0]);
+function RecategorizarTab({ entries, onApply, categories }) {
+  const [desde, setDesde] = useState(categories[0]);
+  const [hacia, setHacia] = useState(categories[0]);
   const [busq, setBusq] = useState("");
   const [applying, setApplying] = useState(false);
   const [incluidos, setIncluidos] = useState(new Set());
@@ -2526,12 +2693,12 @@ function RecategorizarTab({ entries, onApply }) {
       {!busq.trim() && (
         <>
           <label style={labelStyle}>Categoría actual</label>
-          <CategoryChips selected={desde} onSelect={setDesde} />
+          <CategoryChips selected={desde} onSelect={setDesde} cats={categories} />
         </>
       )}
 
       <label style={labelStyle}>Cambiar a</label>
-      <CategoryChips selected={hacia} onSelect={setHacia} />
+      <CategoryChips selected={hacia} onSelect={setHacia} cats={categories} />
 
       <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
         <span>Coinciden <b>{coincidencias.length}</b> movimientos · <b>{seleccionados.length}</b> seleccionados para mover.</span>
@@ -2567,10 +2734,10 @@ function RecategorizarTab({ entries, onApply }) {
   );
 }
 
-function EntryForm({ onClose, onSave, saving }) {
+function EntryForm({ onClose, onSave, saving, categories }) {
   const [type, setType] = useState("gasto");
   const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState(GASTO_CATS[0]);
+  const [category, setCategory] = useState(categories[0]);
   const [desc, setDesc] = useState("");
   const [date, setDate] = useState(todayISO());
   const [usdAmount, setUsdAmount] = useState("");
@@ -2578,11 +2745,11 @@ function EntryForm({ onClose, onSave, saving }) {
   const [account, setAccount] = useState("");
   const [moneda, setMoneda] = useState("ARS");
 
-  const cats = type === "gasto" ? GASTO_CATS : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR;
+  const cats = type === "gasto" ? categories : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR;
   const arsFromCambio = (Number(usdAmount) || 0) * (Number(rate) || 0);
 
   useEffect(() => {
-    setCategory((type === "gasto" ? GASTO_CATS : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR)[0]);
+    setCategory((type === "gasto" ? categories : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR)[0]);
   }, [type]);
 
   function handleSubmit() {
