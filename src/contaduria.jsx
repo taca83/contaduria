@@ -46,8 +46,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v41 · 2026-07-31 · fix recursión infinita en política de household_members
-const APP_VERSION = "v41 · 2026-07-31";
+// v42 · 2026-07-31 · siempre arranca en Resumen al cargar
+const APP_VERSION = "v42 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -503,6 +503,7 @@ export default function FinanzasApp() {
     const ovrObj = {};
     (ovrRows || []).forEach((o) => { ovrObj[o.desc_key] = o.category; });
     setCategoryOverrides(ovrObj);
+    setTab("resumen");
     setLoading(false);
   }
 
