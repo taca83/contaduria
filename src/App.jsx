@@ -46,8 +46,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v43 · 2026-07-31 · reordeno menú chico (Reiniciar datos al final)
-const APP_VERSION = "v43 · 2026-07-31";
+// v44 · 2026-07-31 · invitación al hogar por link/WhatsApp + QR
+const APP_VERSION = "v44 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -475,7 +475,13 @@ export default function FinanzasApp() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authDisplayName, setAuthDisplayName] = useState("");
-  const [authInviteCode, setAuthInviteCode] = useState("");
+  const [authInviteCode, setAuthInviteCode] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("invite") || "";
+    } catch {
+      return "";
+    }
+  });
   const [authHouseholdName, setAuthHouseholdName] = useState("");
   const [authError, setAuthError] = useState(null);
   const [authBusy, setAuthBusy] = useState(false);
@@ -2039,6 +2045,7 @@ function HogarTab({ householdId, onLogout }) {
   const [hh, setHh] = useState(null);
   const [miembros, setMiembros] = useState(null);
   const [copiado, setCopiado] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -2055,6 +2062,26 @@ function HogarTab({ householdId, onLogout }) {
       }
     })();
   }, [householdId]);
+
+  const inviteLink = hh?.invite_code && typeof window !== "undefined"
+    ? `${window.location.origin}/?invite=${hh.invite_code}`
+    : null;
+
+  useEffect(() => {
+    if (!inviteLink) return;
+    (async () => {
+      try {
+        // qrcode se carga recién acá (no como import fijo arriba del
+        // archivo), para no romper el preview de Claude — mismo patrón
+        // que usamos con pdfjs-dist.
+        const QRCode = await import("qrcode");
+        const url = await QRCode.toDataURL(inviteLink, { width: 240, margin: 1 });
+        setQrDataUrl(url);
+      } catch (e) {
+        console.error("No se pudo generar el QR", e);
+      }
+    })();
+  }, [inviteLink]);
 
   function copiarCodigo() {
     if (!hh?.invite_code) return;
@@ -2083,6 +2110,26 @@ function HogarTab({ householdId, onLogout }) {
               </div>
               <button onClick={copiarCodigo} style={btnOutline}>{copiado ? "¡Copiado!" : "Copiar"}</button>
             </div>
+
+            {inviteLink && (
+              <div style={{ textAlign: "center", marginBottom: 16, paddingTop: 4 }}>
+                <a
+                  href={`https://wa.me/?text=${encodeURIComponent(`Te invito a sumarte a nuestro hogar en Contaduría 🏠\nEntrá acá: ${inviteLink}`)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "11px 18px", background: "#25D366", color: "#fff", borderRadius: 8, textDecoration: "none", fontWeight: 700, fontSize: 13.5, marginBottom: 16 }}
+                >
+                  Enviar invitación por WhatsApp
+                </a>
+                {qrDataUrl && (
+                  <div>
+                    <img src={qrDataUrl} alt="Código QR de invitación" style={{ width: 180, height: 180 }} />
+                    <div style={{ fontSize: 12, color: "#8a9698", marginTop: 4 }}>O escaneá este QR</div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {miembros && miembros.length > 0 && (
               <div>
                 <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Miembros</div>
