@@ -46,8 +46,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v40 · 2026-07-31 · multi-hogar: login/registro real, datos aislados por hogar
-const APP_VERSION = "v40 · 2026-07-31";
+// v41 · 2026-07-31 · fix recursión infinita en política de household_members
+const APP_VERSION = "v41 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -2045,7 +2045,7 @@ function HogarTab({ householdId, onLogout }) {
       try {
         const [hhRows, memRows] = await Promise.all([
           sb(`households?id=eq.${householdId}&select=*`),
-          sb(`household_members?household_id=eq.${householdId}&select=display_name,role`),
+          sb("rpc/get_my_household_members", { method: "POST", body: "{}" }),
         ]);
         setHh(hhRows?.[0] || null);
         setMiembros(memRows || []);
