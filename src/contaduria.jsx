@@ -30,7 +30,7 @@ const PRIMARY_TABS = [
   ["presupuestos", "Presupuestos", Target],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["ahorros", "duplicados", "recategorizar", "divisas", "historial", "hogar", "reset"];
+const SECONDARY_TABS = ["hogar", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -46,8 +46,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v42 · 2026-07-31 · siempre arranca en Resumen al cargar
-const APP_VERSION = "v42 · 2026-07-31";
+// v43 · 2026-07-31 · reordeno menú chico (Reiniciar datos al final)
+const APP_VERSION = "v43 · 2026-07-31";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
