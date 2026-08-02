@@ -10,7 +10,7 @@ import {
   Home, List, Upload, Pencil, Check
 } from "lucide-react";
 
-const DEFAULT_GASTO_CATS = ["Comida", "Transporte", "Vivienda", "Servicios", "Comunicaciones", "Salud", "Seguros", "Country/Hebraica", "Escuelas", "Educación", "Ocio", "Cumpleaños", "Auto Citroen", "Auto DS", "Ropa", "Otros"];
+const DEFAULT_GASTO_CATS = ["Comida", "Tarjetas", "Ropa", "Salud", "Educación", "Transporte", "Ocio", "Servicios", "Vivienda", "Otros"];
 const TAB_LABELS = {
   resumen: "Resumen",
   movimientos: "Movimientos",
@@ -47,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v45 · 2026-07-31 · CRUD de categorías (agregar/renombrar/borrar) por hogar
-const APP_VERSION = "v45 · 2026-07-31";
+// v46 · 2026-08-02 · set de 10 categorías estándar para hogares nuevos
+const APP_VERSION = "v46 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
