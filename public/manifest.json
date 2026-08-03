@@ -1,6 +1,6 @@
 {
-  "name": "Contaduría",
-  "short_name": "Contaduría",
+  "name": "Finanzas del hogar",
+  "short_name": "Finanzas",
   "description": "Finanzas familiares compartidas",
   "start_url": "/",
   "display": "standalone",
