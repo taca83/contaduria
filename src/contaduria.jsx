@@ -47,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v51 · 2026-08-02 · Resumen mensual en celu: 3 meses navegables con flechas; Comparar meses fijo al último año (sin meses futuros)
-const APP_VERSION = "v51 · 2026-08-02";
+// v52 · 2026-08-02 · la sesión se renueva sola (refresh token) + desbloqueo biométrico opcional (Mi hogar → Seguridad)
+const APP_VERSION = "v52 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -461,6 +461,59 @@ async function sbFunction(path, body) {
   return data;
 }
 
+// --- Desbloqueo biométrico del dispositivo (Face ID / Touch ID / huella) ---
+// Usa WebAuthn con un autenticador de plataforma. Es una verificación LOCAL
+// del dispositivo (no viaja a ningún servidor ni reemplaza el login real):
+// sirve para no tener que mostrar los datos apenas se abre la app en el
+// celu, ya con la sesión de Supabase restaurada, sin re-escribir usuario y
+// contraseña cada vez.
+function generarDesafioWebAuthn() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  return arr;
+}
+function bufferABase64(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+}
+function base64ABuffer(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+async function soportaBiometria() {
+  if (typeof window === "undefined" || !window.PublicKeyCredential || !PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) return false;
+  try {
+    return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+  } catch {
+    return false;
+  }
+}
+async function registrarBiometria(nombre) {
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      challenge: generarDesafioWebAuthn(),
+      rp: { name: "Contaduría" },
+      user: { id: generarDesafioWebAuthn(), name: nombre || "usuario", displayName: nombre || "Usuario" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required" },
+      timeout: 60000,
+      attestation: "none",
+    },
+  });
+  return bufferABase64(cred.rawId);
+}
+async function verificarBiometria(credentialIdB64) {
+  await navigator.credentials.get({
+    publicKey: {
+      challenge: generarDesafioWebAuthn(),
+      allowCredentials: [{ id: base64ABuffer(credentialIdB64), type: "public-key", transports: ["internal"] }],
+      userVerification: "required",
+      timeout: 60000,
+    },
+  });
+}
+
 // Mapea una fila de la tabla `entries` (Supabase) al shape que usa la app
 function entryFromDb(row) {
   return {
@@ -558,6 +611,47 @@ export default function FinanzasApp() {
 
   const [loadError, setLoadError] = useState(null);
 
+  // --- Desbloqueo biométrico (Face ID / Touch ID / huella) del dispositivo ---
+  const [biometriaSoportada, setBiometriaSoportada] = useState(false);
+  const [biometriaActiva, setBiometriaActiva] = useState(() => typeof window !== "undefined" && !!safeGet("biometric_credential_id"));
+  const [desbloqueado, setDesbloqueado] = useState(false);
+  const [bioBusy, setBioBusy] = useState(false);
+  const [bioError, setBioError] = useState(null);
+
+  useEffect(() => { soportaBiometria().then(setBiometriaSoportada); }, []);
+
+  async function activarBiometria() {
+    setBioError(null);
+    setBioBusy(true);
+    try {
+      const credId = await registrarBiometria(profileName);
+      safeSet("biometric_credential_id", credId);
+      setBiometriaActiva(true);
+    } catch (e) {
+      setBioError("No pudimos activar el desbloqueo biométrico: " + e.message);
+    }
+    setBioBusy(false);
+  }
+
+  function desactivarBiometria() {
+    safeSet("biometric_credential_id", null);
+    setBiometriaActiva(false);
+    setDesbloqueado(true);
+  }
+
+  async function intentarDesbloquear() {
+    setBioError(null);
+    setBioBusy(true);
+    try {
+      const credId = safeGet("biometric_credential_id");
+      await verificarBiometria(credId);
+      setDesbloqueado(true);
+    } catch (e) {
+      setBioError("No se pudo verificar. Probá de nuevo.");
+    }
+    setBioBusy(false);
+  }
+
   // --- pantalla de login/registro ---
   const [authMode, setAuthMode] = useState("login"); // "login" | "signup" | "onboarding"
   const [authEmail, setAuthEmail] = useState("");
@@ -623,7 +717,21 @@ export default function FinanzasApp() {
           return;
         }
         setSession(stored);
-        await cargarHogarYDatos(stored.access_token);
+        try {
+          await cargarHogarYDatos(stored.access_token);
+        } catch (e) {
+          // El access_token dura ~1h — si venció, probamos renovarlo con el
+          // refresh_token antes de mandar a la persona a loguearse de nuevo.
+          if (!stored.refresh_token) throw e;
+          const renovada = await sbAuth("token?grant_type=refresh_token", {
+            method: "POST",
+            body: JSON.stringify({ refresh_token: stored.refresh_token }),
+          });
+          if (!renovada?.access_token) throw e;
+          safeSet("auth_session", renovada);
+          setSession(renovada);
+          await cargarHogarYDatos(renovada.access_token);
+        }
       } catch (e) {
         console.error(e);
         // token vencido u otro problema — pedimos login de nuevo
@@ -662,6 +770,7 @@ export default function FinanzasApp() {
         });
       }
       await cargarHogarYDatos(data.access_token);
+      setDesbloqueado(true);
     } catch (e) {
       setAuthError(e.message);
     }
@@ -679,6 +788,7 @@ export default function FinanzasApp() {
       safeSet("auth_session", data);
       setSession(data);
       await cargarHogarYDatos(data.access_token);
+      setDesbloqueado(true);
     } catch (e) {
       setAuthError(e.message);
     }
@@ -701,6 +811,7 @@ export default function FinanzasApp() {
         });
       }
       await cargarHogarYDatos(session.access_token);
+      setDesbloqueado(true);
     } catch (e) {
       setAuthError(e.message);
     }
@@ -1089,6 +1200,28 @@ export default function FinanzasApp() {
     );
   }
 
+  // Sesión restaurada en silencio (la persona no acaba de tipear su
+  // contraseña recién) + tiene activado el desbloqueo biométrico en este
+  // dispositivo: pedimos esa confirmación antes de mostrar los datos.
+  if (biometriaActiva && !desbloqueado) {
+    return (
+      <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
+        <style>{fontImports}</style>
+        <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 380, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)", textAlign: "center" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
+          <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 24 }}>Hola, {profileName}. Desbloqueá para ver tus datos.</div>
+          {bioError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 14 }}>{bioError}</div>}
+          <button onClick={intentarDesbloquear} disabled={bioBusy} style={{ ...btnPrimary, width: "100%", justifyContent: "center", padding: "13px" }}>
+            {bioBusy ? "Verificando..." : "Desbloquear con Face ID / huella"}
+          </button>
+          <button onClick={handleLogout} style={{ background: "none", border: "none", color: "#8a9698", fontSize: 12.5, marginTop: 16, cursor: "pointer" }}>
+            Cerrar sesión
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ minHeight: "100vh", background: PAPER, fontFamily: "Inter, sans-serif", color: INK, paddingBottom: 90 }}>
       <style>{fontImports}</style>
@@ -1304,7 +1437,16 @@ export default function FinanzasApp() {
             <ResetTab onReset={resetearTodo} />
           )}
           {tab === "hogar" && (
-            <HogarTab householdId={householdId} onLogout={handleLogout} />
+            <HogarTab
+              householdId={householdId}
+              onLogout={handleLogout}
+              biometriaSoportada={biometriaSoportada}
+              biometriaActiva={biometriaActiva}
+              onActivarBiometria={activarBiometria}
+              onDesactivarBiometria={desactivarBiometria}
+              bioBusy={bioBusy}
+              bioError={bioError}
+            />
           )}
           {tab === "categorias" && (
             <CategoriasTab categories={categories} contarUsos={contarUsos} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory} />
@@ -2357,7 +2499,7 @@ function ImportarTab({ onImport, categoryOverrides }) {
   );
 }
 
-function HogarTab({ householdId, onLogout }) {
+function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, onActivarBiometria, onDesactivarBiometria, bioBusy, bioError }) {
   const [hh, setHh] = useState(null);
   const [miembros, setMiembros] = useState(null);
   const [copiado, setCopiado] = useState(false);
@@ -2459,6 +2601,36 @@ function HogarTab({ householdId, onLogout }) {
           </>
         )}
       </div>
+
+      {HAS_SUPABASE && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Seguridad</div>
+          {!biometriaSoportada ? (
+            <div style={{ fontSize: 12.5, color: "#8a9698" }}>
+              Este dispositivo/navegador no tiene Face ID, Touch ID o huella disponible para la app.
+            </div>
+          ) : biometriaActiva ? (
+            <>
+              <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 12 }}>
+                Activado: cada vez que abras la app en este dispositivo (con la sesión ya guardada) te vamos a pedir Face ID / Touch ID / huella antes de mostrar tus datos.
+              </div>
+              <button onClick={onDesactivarBiometria} style={{ ...btnOutline, justifyContent: "center", width: "100%" }}>
+                Desactivar desbloqueo biométrico
+              </button>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 12 }}>
+                Podés activar que la app te pida Face ID / Touch ID / huella cada vez que la abras en este dispositivo, en vez de mostrar los datos directo. Te va a pedir confirmarlo ahora una vez con tu biometría para guardarlo.
+              </div>
+              {bioError && <div style={{ color: BRICK, fontSize: 12, marginBottom: 10 }}>{bioError}</div>}
+              <button onClick={onActivarBiometria} disabled={bioBusy} style={{ ...btnPrimary, justifyContent: "center", width: "100%" }}>
+                {bioBusy ? "Confirmando..." : "Activar desbloqueo biométrico"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       <button onClick={onLogout} style={{ ...btnOutline, color: BRICK, borderColor: BRICK, justifyContent: "center" }}>
         Cerrar sesión
