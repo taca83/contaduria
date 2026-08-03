@@ -7,7 +7,7 @@ import {
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
   ArrowUpRight, ArrowDownRight, ArrowLeft, Landmark, Settings, Trash2, User, Download, Menu,
-  Home, List, Upload, Pencil, Check, Mic, Square, Zap
+  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera
 } from "lucide-react";
 
 const DEFAULT_GASTO_CATS = ["Comida", "Tarjetas", "Ropa", "Salud", "Educación", "Transporte", "Ocio", "Servicios", "Vivienda", "Otros"];
@@ -51,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v66 · 2026-08-03 · menú migrado a drawer lateral izquierdo con animación de deslizamiento, en vez de dropdown a la derecha
-const APP_VERSION = "v66 · 2026-08-03";
+// v68 · 2026-08-03 · carga por foto de recibo: la IA lee monto, fecha, categoría y detalle (nuevo botón cámara)
+const APP_VERSION = "v68 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -674,6 +674,7 @@ export default function FinanzasApp() {
   const [formType, setFormType] = useState("gasto");
   const [showVoice, setShowVoice] = useState(false);
   const [voicePrefill, setVoicePrefill] = useState(null);
+  const [showFoto, setShowFoto] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // --- Layout responsive: por ahora un único breakpoint (≥900px = desktop) ---
@@ -1497,7 +1498,7 @@ export default function FinanzasApp() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: PAPER, fontFamily: "Inter, sans-serif", color: INK, paddingBottom: 90 }}>
+    <div style={{ minHeight: "100vh", background: PAPER, fontFamily: "Inter, sans-serif", color: INK, paddingBottom: 150 }}>
       <style>{fontImports}</style>
       <style>{`
         * { box-sizing: border-box; }
@@ -1629,30 +1630,6 @@ export default function FinanzasApp() {
                 <Stat icon={<ArrowUpRight size={14} color={GREEN} />} label="Ingresos" value={fmtARS(totalIngresos)} />
                 <Stat icon={<ArrowDownRight size={14} color={BRICK} />} label="Gastos" value={fmtARS(totalGastos)} />
                 <Stat icon={<PiggyBank size={14} color={GOLD} />} label="Ahorrado" value={fmtARS(totalAhorro)} />
-              </div>
-            </div>
-
-            {/* Secciones principales */}
-            <div style={{ marginTop: 22 }}>
-              <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8 }}>
-                {PRIMARY_TABS.map(([key, label, Icon]) => (
-                  <button
-                    key={key}
-                    onClick={() => setTab(key)}
-                    style={{
-                      display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-                      width: 150, flexShrink: 0,
-                      padding: "14px 6px", borderRadius: 10, cursor: "pointer",
-                      border: `1.5px solid ${tab === key ? TEAL : "#ddd6c4"}`,
-                      background: tab === key ? TEAL : "#fff",
-                      color: tab === key ? "#fff" : INK,
-                      boxShadow: tab === key ? "0 4px 14px rgba(15,110,110,0.25)" : "0 1px 4px rgba(27,42,46,0.06)",
-                    }}
-                  >
-                    <Icon size={20} />
-                    <span style={{ fontSize: 11.5, fontWeight: 700, textAlign: "center", lineHeight: 1.1 }}>{label}</span>
-                  </button>
-                ))}
               </div>
             </div>
           </>
@@ -1818,7 +1795,7 @@ export default function FinanzasApp() {
 
       {ultimoAccesoRegistrado && (
         <div style={{
-          position: "fixed", bottom: 90, left: "50%", transform: "translateX(-50%)",
+          position: "fixed", bottom: 154, left: "50%", transform: "translateX(-50%)",
           background: INK, color: PAPER, borderRadius: 10, padding: "10px 16px",
           display: "flex", alignItems: "center", gap: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
           zIndex: 15, fontSize: 13, whiteSpace: "nowrap",
@@ -1830,11 +1807,50 @@ export default function FinanzasApp() {
         </div>
       )}
 
+      {/* Barra de navegación fija abajo, estilo apps bancarias */}
+      <div style={{
+        position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 12,
+        background: "#fff", borderTop: "1px solid #e6e0d0",
+        boxShadow: "0 -4px 16px rgba(27,42,46,0.08)",
+        display: "flex", justifyContent: "space-around", alignItems: "stretch",
+        paddingBottom: "env(safe-area-inset-bottom, 0px)",
+      }}>
+        {PRIMARY_TABS.map(([key, label, Icon]) => {
+          const active = tab === key;
+          return (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              style={{
+                flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+                padding: "10px 4px 8px", background: "none", border: "none", cursor: "pointer",
+                borderTop: `2px solid ${active ? TEAL : "transparent"}`,
+                color: active ? TEAL : "#8a9698",
+              }}
+            >
+              <Icon size={21} />
+              <span style={{ fontSize: 10.5, fontWeight: active ? 700 : 500 }}>{label}</span>
+            </button>
+          );
+        })}
+      </div>
+
       {/* FAB */}
+      <button
+        onClick={() => setShowFoto(true)}
+        style={{
+          position: "fixed", bottom: 78, right: 154, width: 48, height: 48, borderRadius: "50%",
+          background: "#fff", color: TEAL, border: `1.5px solid ${TEAL}`, boxShadow: "0 4px 14px rgba(27,42,46,0.15)",
+          display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10
+        }}
+        aria-label="Cargar movimiento con una foto de recibo"
+      >
+        <Camera size={20} />
+      </button>
       <button
         onClick={() => setShowVoice(true)}
         style={{
-          position: "fixed", bottom: 22, right: 88, width: 48, height: 48, borderRadius: "50%",
+          position: "fixed", bottom: 78, right: 88, width: 48, height: 48, borderRadius: "50%",
           background: "#fff", color: TEAL, border: `1.5px solid ${TEAL}`, boxShadow: "0 4px 14px rgba(27,42,46,0.15)",
           display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10
         }}
@@ -1845,7 +1861,7 @@ export default function FinanzasApp() {
       <button
         onClick={() => setShowForm(true)}
         style={{
-          position: "fixed", bottom: 22, right: 22, width: 56, height: 56, borderRadius: "50%",
+          position: "fixed", bottom: 78, right: 22, width: 56, height: 56, borderRadius: "50%",
           background: TEAL, color: "#fff", border: "none", boxShadow: "0 8px 20px rgba(15,110,110,0.4)",
           display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10
         }}
@@ -1853,6 +1869,18 @@ export default function FinanzasApp() {
       >
         <Plus size={26} />
       </button>
+
+      {showFoto && (
+        <FotoReciboModal
+          categories={categories}
+          onClose={() => setShowFoto(false)}
+          onExtracted={(datos) => {
+            setVoicePrefill(datos);
+            setShowFoto(false);
+            setShowForm(true);
+          }}
+        />
+      )}
 
       {showVoice && (
         <VoiceEntryModal
@@ -4008,6 +4036,112 @@ function RecategorizarTab({ entries, onApply, categories }) {
       <button onClick={handleApply} disabled={seleccionados.length === 0 || applying} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
         {applying ? "Aplicando..." : `Recategorizar ${seleccionados.length} movimientos a "${hacia}"`}
       </button>
+    </div>
+  );
+}
+
+function FotoReciboModal({ onClose, onExtracted, categories }) {
+  const [imagenUrl, setImagenUrl] = useState(null);
+  const [analizando, setAnalizando] = useState(false);
+  const [error, setError] = useState(null);
+  const fileRef = useRef(null);
+  const blobRef = useRef(null);
+
+  // Achica la foto antes de mandarla (las fotos de celu pesan varios MB;
+  // para leer un ticket alcanza con mucho menos, así sale más rápido y
+  // barato el análisis).
+  function comprimirYMostrar(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxAncho = 1280;
+        const escala = Math.min(1, maxAncho / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * escala);
+        canvas.height = Math.round(img.height * escala);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => {
+          blobRef.current = blob;
+          setImagenUrl(URL.createObjectURL(blob));
+        }, "image/jpeg", 0.75);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function handleFile(e) {
+    setError(null);
+    const file = e.target.files?.[0];
+    if (file) comprimirYMostrar(file);
+    e.target.value = ""; // permite volver a elegir el mismo archivo si hace falta
+  }
+
+  function sacarOtra() {
+    setImagenUrl(null);
+    blobRef.current = null;
+    setError(null);
+  }
+
+  async function analizar() {
+    if (!blobRef.current) return;
+    setAnalizando(true);
+    setError(null);
+    try {
+      const image_base64 = await blobToBase64(blobRef.current);
+      const resultado = await sbFunction("analizar-recibo", { image_base64, mime_type: "image/jpeg", categorias: categories });
+      if (resultado?.error) throw new Error(resultado.error);
+      const categoriaFinal = categories.includes(resultado.categoria) ? resultado.categoria : "Otros";
+      const detalle = [resultado.comercio, resultado.desc].filter(Boolean).join(" — ");
+      onExtracted({
+        type: "gasto",
+        amount: resultado.monto != null ? Number(resultado.monto) : "",
+        category: categoriaFinal,
+        date: resultado.fecha || todayISO(),
+        desc: detalle,
+      });
+    } catch (e) {
+      setError("No pude leer el recibo: " + e.message);
+    }
+    setAnalizando(false);
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: "flex-end", zIndex: 25 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: "100%", borderRadius: "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>Foto de recibo</div>
+          <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer" }} aria-label="Cerrar"><X size={22} /></button>
+        </div>
+        <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 16 }}>
+          Sacale una foto al ticket o comprobante — la IA lee el monto, la fecha y elige la categoría. Después revisás todo antes de guardar.
+        </div>
+
+        {error && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
+
+        {!imagenUrl ? (
+          <button
+            onClick={() => fileRef.current?.click()}
+            style={{ ...btnPrimary, width: "100%", justifyContent: "center", padding: "14px" }}
+          >
+            <Camera size={18} /> Sacar foto / elegir imagen
+          </button>
+        ) : (
+          <>
+            <img src={imagenUrl} alt="Recibo" style={{ width: "100%", borderRadius: 10, marginBottom: 12, maxHeight: 320, objectFit: "contain", background: "#111" }} />
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              <button onClick={sacarOtra} style={{ ...btnOutline, flex: 1, justifyContent: "center" }}>Sacar otra</button>
+              <button onClick={analizar} disabled={analizando} style={{ ...btnPrimary, flex: 1, justifyContent: "center" }}>
+                {analizando ? "Analizando..." : "Analizar recibo"}
+              </button>
+            </div>
+          </>
+        )}
+
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+      </div>
     </div>
   );
 }
