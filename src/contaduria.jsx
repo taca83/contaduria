@@ -6,7 +6,7 @@ import {
 } from "recharts";
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
-  ArrowUpRight, ArrowDownRight, Landmark, Settings, Trash2, User, Download, Menu,
+  ArrowUpRight, ArrowDownRight, ArrowLeft, Landmark, Settings, Trash2, User, Download, Menu,
   Home, List, Upload, Pencil, Check, Mic, Square, Zap
 } from "lucide-react";
 
@@ -51,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v63 · 2026-08-03 · pestaña "Cuentas": gastos e ingresos diferenciados por tarjeta/cuenta/efectivo
-const APP_VERSION = "v63 · 2026-08-03";
+// v66 · 2026-08-03 · menú migrado a drawer lateral izquierdo con animación de deslizamiento, en vez de dropdown a la derecha
+const APP_VERSION = "v66 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1512,11 +1512,20 @@ export default function FinanzasApp() {
       <div style={{ background: INK, color: PAPER, padding: "20px 20px 26px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", maxWidth: isDesktop ? 1080 : 720, margin: "0 auto" }}>
           <div>
-            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600 }}>Finanzas del hogar</div>
-            <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button
+                onClick={() => setMenuOpen(true)}
+                aria-label="Abrir menú"
+                style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: PAPER, flexShrink: 0 }}
+              >
+                <Menu size={18} />
+              </button>
+              <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600 }}>Finanzas del hogar</div>
+            </div>
+            <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2, marginLeft: 42 }}>
               Hola, {profileName}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, marginLeft: 42 }}>
               <button onClick={() => shiftMonth(-1)} aria-label="Mes anterior" style={{ background: "none", border: "none", cursor: "pointer", color: PAPER, opacity: 0.8, padding: 2 }}>◀</button>
               <span style={{ fontSize: 13, fontWeight: 700, textTransform: "capitalize", minWidth: 130, textAlign: "center" }}>{monthLabel(selectedMonth)}</span>
               <button onClick={() => shiftMonth(1)} aria-label="Mes siguiente" style={{ background: "none", border: "none", cursor: "pointer", color: PAPER, opacity: 0.8, padding: 2 }}>▶</button>
@@ -1526,54 +1535,20 @@ export default function FinanzasApp() {
                 </button>
               )}
             </div>
-            <div style={{ fontSize: 9.5, color: "#5f7376", marginTop: 6 }}>{APP_VERSION}</div>
+            <div style={{ fontSize: 9.5, color: "#5f7376", marginTop: 6, marginLeft: 42 }}>{APP_VERSION}</div>
             {!HAS_SUPABASE && (
-              <div style={{ fontSize: 10.5, color: GOLD, marginTop: 4, fontWeight: 700 }}>
+              <div style={{ fontSize: 10.5, color: GOLD, marginTop: 4, fontWeight: 700, marginLeft: 42 }}>
                 ⚠ Vista previa local — no conectado a Supabase
               </div>
             )}
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-            <div style={{ display: "flex", gap: 6, alignItems: "center", position: "relative" }}>
-              <div title={profileName} style={{
-                width: 28, height: 28, borderRadius: "50%",
-                background: GOLD, color: INK,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 12, fontWeight: 700
-              }}>{profileName?.[0]?.toUpperCase()}</div>
-              <button
-                onClick={() => setMenuOpen((v) => !v)}
-                aria-label="Más opciones"
-                style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, width: 32, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: PAPER }}
-              >
-                <Menu size={16} />
-              </button>
-              {menuOpen && (
-                <>
-                  <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 9 }} />
-                  <div style={{
-                    position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 10, minWidth: 190,
-                    background: "#fff", borderRadius: 8, boxShadow: "0 8px 28px rgba(27,42,46,0.25)",
-                    border: "1px solid #ddd6c4", overflow: "hidden",
-                  }}>
-                    {menuTabs.map((key) => (
-                      <button
-                        key={key}
-                        onClick={() => { setTab(key); setMenuOpen(false); }}
-                        style={{
-                          display: "block", width: "100%", textAlign: "left", padding: "11px 16px",
-                          background: tab === key ? PAPER_DIM : "#fff", border: "none", borderBottom: "1px solid #f0ece0",
-                          cursor: "pointer", fontSize: 13.5, fontWeight: tab === key ? 700 : 500,
-                          color: tab === key ? TEAL : INK,
-                        }}
-                      >
-                        {TAB_LABELS[key]}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
+            <div title={profileName} style={{
+              width: 28, height: 28, borderRadius: "50%",
+              background: GOLD, color: INK,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 12, fontWeight: 700
+            }}>{profileName?.[0]?.toUpperCase()}</div>
             <button
               onClick={exportarExcel}
               title="Exportar todos los movimientos a Excel"
@@ -1589,15 +1564,53 @@ export default function FinanzasApp() {
         </div>
       </div>
 
+      {/* Menú lateral (drawer) — se desliza desde la izquierda, con overlay oscuro atrás */}
+      {menuOpen && (
+        <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.45)", zIndex: 30 }} />
+      )}
+      <div
+        style={{
+          position: "fixed", top: 0, left: 0, bottom: 0, width: 280, maxWidth: "82vw",
+          background: "#fff", zIndex: 31, display: "flex", flexDirection: "column", overflowY: "auto",
+          boxShadow: menuOpen ? "4px 0 24px rgba(0,0,0,0.25)" : "none",
+          transform: menuOpen ? "translateX(0)" : "translateX(-100%)",
+          transition: "transform 0.28s ease",
+        }}
+      >
+        <div style={{ background: INK, color: PAPER, padding: "20px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 18 }}>Finanzas del hogar</div>
+          <button onClick={() => setMenuOpen(false)} aria-label="Cerrar menú" style={{ background: "none", border: "none", color: PAPER, cursor: "pointer", display: "flex" }}>
+            <X size={20} />
+          </button>
+        </div>
+        <div style={{ padding: "8px 0", flex: 1 }}>
+          {menuTabs.map((key) => (
+            <button
+              key={key}
+              onClick={() => { setTab(key); setMenuOpen(false); }}
+              style={{
+                display: "block", width: "100%", textAlign: "left", padding: "13px 20px",
+                background: tab === key ? PAPER_DIM : "transparent",
+                border: "none", borderLeft: `3px solid ${tab === key ? TEAL : "transparent"}`,
+                cursor: "pointer", fontSize: 14.5, fontWeight: tab === key ? 700 : 500,
+                color: tab === key ? TEAL : INK,
+              }}
+            >
+              {TAB_LABELS[key]}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div style={{ maxWidth: isDesktop ? 1080 : 720, margin: "0 auto", padding: "0 16px" }}>
         {menuTabs.includes(tab) ? (
           <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 10 }}>
             <button
               onClick={() => setTab("resumen")}
-              style={{ ...btnOutline, padding: "8px 10px" }}
+              style={{ ...btnOutline, padding: "8px 10px", display: "flex", alignItems: "center", gap: 6 }}
               aria-label="Volver al Resumen"
             >
-              ← Volver
+              <ArrowLeft size={16} /> Volver
             </button>
             <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>{TAB_LABELS[tab]}</div>
           </div>
@@ -1621,13 +1634,14 @@ export default function FinanzasApp() {
 
             {/* Secciones principales */}
             <div style={{ marginTop: 22 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+              <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8 }}>
                 {PRIMARY_TABS.map(([key, label, Icon]) => (
                   <button
                     key={key}
                     onClick={() => setTab(key)}
                     style={{
                       display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+                      width: 150, flexShrink: 0,
                       padding: "14px 6px", borderRadius: 10, cursor: "pointer",
                       border: `1.5px solid ${tab === key ? TEAL : "#ddd6c4"}`,
                       background: tab === key ? TEAL : "#fff",
