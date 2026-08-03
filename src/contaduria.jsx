@@ -49,8 +49,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v56 · 2026-08-02 · modo calculadora en el Monto de Nuevo movimiento (1500+320, 8400/2, etc.)
-const APP_VERSION = "v56 · 2026-08-02";
+// v57 · 2026-08-02 · fix: Gastos recurrentes y Accesos rápidos no se guardaban de verdad (id inválido para columna uuid)
+const APP_VERSION = "v57 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -437,6 +437,16 @@ function todayISO() {
 }
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// uid() no genera UUIDs válidos (son para columnas "text" como entries.id).
+// Para tablas cuyo id es "uuid" (recurring_entries, quick_entries) hace
+// falta esto, o Postgres rechaza el insert.
+function uidUuid() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+    (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)
+  );
 }
 
 function safeEnv() {
@@ -1105,7 +1115,7 @@ export default function FinanzasApp() {
 
   async function addRecurrente(datos) {
     const nuevo = {
-      id: uid(),
+      id: uidUuid(),
       type: datos.type,
       category: datos.category,
       amount: Number(datos.amount) || 0,
@@ -1117,8 +1127,14 @@ export default function FinanzasApp() {
     };
     const next = [...recurrentes, nuevo];
     setRecurrentes(next);
-    if (!HAS_SUPABASE) { mockSaveRecurrentes(next); return; }
-    await sb("recurring_entries", { method: "POST", body: JSON.stringify([{ ...nuevo, household_id: householdId }]) });
+    if (!HAS_SUPABASE) { mockSaveRecurrentes(next); return { ok: true }; }
+    try {
+      await sb("recurring_entries", { method: "POST", body: JSON.stringify([{ ...nuevo, household_id: householdId }]) });
+      return { ok: true };
+    } catch (e) {
+      setRecurrentes(recurrentes); // revertir: no se guardó de verdad
+      return { error: "No se pudo guardar: " + e.message };
+    }
   }
 
   async function toggleActivoRecurrente(id, activo) {
@@ -1144,7 +1160,7 @@ export default function FinanzasApp() {
 
   async function addAccesoRapido(datos) {
     const nuevo = {
-      id: uid(),
+      id: uidUuid(),
       type: "gasto",
       category: datos.category,
       amount: Number(datos.amount) || 0,
@@ -1155,8 +1171,14 @@ export default function FinanzasApp() {
     };
     const next = [...accesosRapidos, nuevo];
     setAccesosRapidos(next);
-    if (!HAS_SUPABASE) { mockSaveAccesosRapidos(next); return; }
-    await sb("quick_entries", { method: "POST", body: JSON.stringify([{ ...nuevo, household_id: householdId }]) });
+    if (!HAS_SUPABASE) { mockSaveAccesosRapidos(next); return { ok: true }; }
+    try {
+      await sb("quick_entries", { method: "POST", body: JSON.stringify([{ ...nuevo, household_id: householdId }]) });
+      return { ok: true };
+    } catch (e) {
+      setAccesosRapidos(accesosRapidos); // revertir: no se guardó de verdad
+      return { error: "No se pudo guardar: " + e.message };
+    }
   }
 
   async function editAccesoRapido(id, cambios) {
@@ -2988,6 +3010,7 @@ function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onE
   const [monto, setMonto] = useState("");
   const [cuenta, setCuenta] = useState("");
   const [agregando, setAgregando] = useState(false);
+  const [addError, setAddError] = useState(null);
 
   const [editandoId, setEditandoId] = useState(null);
   const [editNombre, setEditNombre] = useState("");
@@ -2995,9 +3018,11 @@ function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onE
 
   async function handleAdd() {
     if (!nombre.trim() || !monto || Number(monto) <= 0) return;
+    setAddError(null);
     setAgregando(true);
-    await onAdd({ desc: nombre.trim(), category: categoria, amount: monto, account: cuenta });
+    const res = await onAdd({ desc: nombre.trim(), category: categoria, amount: monto, account: cuenta });
     setAgregando(false);
+    if (res?.error) { setAddError(res.error); return; }
     setNombre("");
     setMonto("");
     setCuenta("");
@@ -3037,6 +3062,7 @@ function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onE
           <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 14, fontSize: 18, fontFamily: "'IBM Plex Mono', monospace" }} />
           <label style={labelStyle}>Cuenta (opcional)</label>
           <input value={cuenta} onChange={(e) => setCuenta(e.target.value)} placeholder="Ej: Efectivo" style={{ ...inputStyle, marginBottom: 14 }} />
+          {addError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 10 }}>{addError}</div>}
           <button onClick={handleAdd} disabled={agregando} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
             {agregando ? "Agregando..." : "Agregar acceso rápido"}
           </button>
@@ -3107,6 +3133,7 @@ function RecurrentesTab({ recurrentes, categories, onAdd, onToggleActivo, onEdit
 
   const [editandoId, setEditandoId] = useState(null);
   const [editValue, setEditValue] = useState("");
+  const [addError, setAddError] = useState(null);
 
   const cats = tipo === "gasto" ? categories : INGRESO_CATS;
 
@@ -3114,9 +3141,11 @@ function RecurrentesTab({ recurrentes, categories, onAdd, onToggleActivo, onEdit
 
   async function handleAdd() {
     if (!monto || Number(monto) <= 0) return;
+    setAddError(null);
     setAgregando(true);
-    await onAdd({ type: tipo, category: categoria, amount: monto, desc, account: cuenta, diaMes });
+    const res = await onAdd({ type: tipo, category: categoria, amount: monto, desc, account: cuenta, diaMes });
     setAgregando(false);
+    if (res?.error) { setAddError(res.error); return; }
     setMonto("");
     setDesc("");
   }
@@ -3174,6 +3203,7 @@ function RecurrentesTab({ recurrentes, categories, onAdd, onToggleActivo, onEdit
           Máximo día 28, para que funcione igual todos los meses (incluyendo febrero).
         </div>
 
+        {addError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 10 }}>{addError}</div>}
         <button onClick={handleAdd} disabled={agregando || !monto} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
           {agregando ? "Agregando..." : "Agregar recurrente"}
         </button>
