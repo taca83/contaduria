@@ -26,6 +26,7 @@ const TAB_LABELS = {
   hogar: "Mi hogar",
   categorias: "Categorías",
   recurrentes: "Gastos recurrentes",
+  admin: "Panel admin (todos los hogares)",
 };
 const PRIMARY_TABS = [
   ["resumen", "Resumen", Home],
@@ -49,8 +50,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v57 · 2026-08-02 · fix: Gastos recurrentes y Accesos rápidos no se guardaban de verdad (id inválido para columna uuid)
-const APP_VERSION = "v57 · 2026-08-02";
+// v58 · 2026-08-02 · panel admin cross-hogar (ingresos por hogar/persona), acceso restringido vía app_admins + RPC del lado del servidor
+const APP_VERSION = "v58 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -662,6 +663,7 @@ export default function FinanzasApp() {
   const [categoryOverrides, setCategoryOverrides] = useState({});
   const [categories, setCategories] = useState(DEFAULT_GASTO_CATS);
   const [recurrentes, setRecurrentes] = useState([]);
+  const [esAdmin, setEsAdmin] = useState(false);
   const [accesosRapidos, setAccesosRapidos] = useState([]);
   const [ultimoAccesoRegistrado, setUltimoAccesoRegistrado] = useState(null);
   const [tab, setTab] = useState("resumen");
@@ -776,6 +778,9 @@ export default function FinanzasApp() {
     setLoading(false);
     generarRecurrentesDelMes(recurrentesCargadas, entriesCargadas, hh.household_id, hh.display_name)
       .catch((e) => console.error("No se pudieron generar los recurrentes del mes", e));
+    sb("rpc/soy_admin", { method: "POST", body: "{}" })
+      .then((v) => setEsAdmin(Boolean(v)))
+      .catch(() => setEsAdmin(false)); // función vieja/inexistente en Supabase → no es admin, sin romper nada
   }
 
   // Si algún gasto/ingreso recurrente activo ya "llegó" (hoy >= día
@@ -945,6 +950,7 @@ export default function FinanzasApp() {
     setCategoryOverrides({});
     setRecurrentes([]);
     setAccesosRapidos([]);
+    setEsAdmin(false);
     setAuthMode("login");
   }
 
@@ -1313,6 +1319,11 @@ export default function FinanzasApp() {
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   }, [thisMonthEntries]);
 
+  // "Panel admin" solo se ofrece si la función soy_admin() confirmó que
+  // este usuario está en app_admins — el chequeo real y no salteable pasa
+  // igual del lado del servidor cuando se pide el contenido.
+  const menuTabs = esAdmin ? [...SECONDARY_TABS, "admin"] : SECONDARY_TABS;
+
   if (loading) {
     return (
       <div style={{ minHeight: "100vh", background: PAPER, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Inter, sans-serif", color: INK }}>
@@ -1513,7 +1524,7 @@ export default function FinanzasApp() {
                     background: "#fff", borderRadius: 8, boxShadow: "0 8px 28px rgba(27,42,46,0.25)",
                     border: "1px solid #ddd6c4", overflow: "hidden",
                   }}>
-                    {SECONDARY_TABS.map((key) => (
+                    {menuTabs.map((key) => (
                       <button
                         key={key}
                         onClick={() => { setTab(key); setMenuOpen(false); }}
@@ -1547,7 +1558,7 @@ export default function FinanzasApp() {
       </div>
 
       <div style={{ maxWidth: isDesktop ? 1080 : 720, margin: "0 auto", padding: "0 16px" }}>
-        {SECONDARY_TABS.includes(tab) ? (
+        {menuTabs.includes(tab) ? (
           <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 10 }}>
             <button
               onClick={() => setTab("resumen")}
@@ -1706,6 +1717,7 @@ export default function FinanzasApp() {
               onDelete={deleteAccesoRapido}
             />
           )}
+          {tab === "admin" && <AdminTab />}
           {tab === "recategorizar" && (
             <RecategorizarTab
               categories={categories}
@@ -2999,6 +3011,77 @@ function CategoriasTab({ categories, contarUsos, onAdd, onRename, onDelete }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function AdminTab() {
+  const [filas, setFilas] = useState(null);
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState(null);
+  const [expandido, setExpandido] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const rows = await sb("rpc/admin_resumen_ingresos", { method: "POST", body: "{}" });
+        setFilas(rows || []);
+      } catch (e) {
+        setError(e.message || "No se pudo cargar.");
+      }
+      setCargando(false);
+    })();
+  }, []);
+
+  if (cargando) return <div style={{ fontSize: 13, color: "#8a9698" }}>Cargando...</div>;
+  if (error) return <div style={{ color: BRICK, fontSize: 13 }}>No se pudo cargar el panel admin: {error}</div>;
+  if (!filas || filas.length === 0) return <EmptyState text="Todavía no hay ingresos cargados en ningún hogar." />;
+
+  // Agrupamos hogar -> persona -> [{mes, monto}]
+  const hogares = {};
+  filas.forEach((f) => {
+    if (!hogares[f.household_id]) hogares[f.household_id] = { nombre: f.household_name, personas: {} };
+    const persona = f.member_name || "(sin nombre)";
+    if (!hogares[f.household_id].personas[persona]) hogares[f.household_id].personas[persona] = { total: 0, meses: [] };
+    hogares[f.household_id].personas[persona].total += Number(f.total_ingresos);
+    hogares[f.household_id].personas[persona].meses.push({ mes: f.mes, monto: Number(f.total_ingresos) });
+  });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ fontSize: 12.5, color: "#8a9698" }}>
+        Ingresos totales por hogar y persona (todos los hogares que usan la app). Acceso restringido a administradores — nadie más ve esta pestaña.
+      </div>
+      {Object.entries(hogares).map(([hhId, hh]) => (
+        <div key={hhId} style={{ background: "#fff", borderRadius: 10, padding: 16, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, marginBottom: 6 }}>{hh.nombre}</div>
+          {Object.entries(hh.personas).map(([nombre, p]) => {
+            const key = `${hhId}-${nombre}`;
+            const abierto = expandido === key;
+            return (
+              <div key={key} style={{ borderTop: "1px solid #f0ece0", paddingTop: 8, marginTop: 8 }}>
+                <div onClick={() => setExpandido(abierto ? null : key)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+                  <span style={{ fontSize: 13.5, fontWeight: 600 }}>{nombre}</span>
+                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: GREEN, fontWeight: 700 }}>{fmtARS(p.total)}</span>
+                    <span style={{ fontSize: 10, color: "#8a9698" }}>{abierto ? "▲" : "▼"}</span>
+                  </span>
+                </div>
+                {abierto && (
+                  <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+                    {[...p.meses].sort((a, b) => b.mes.localeCompare(a.mes)).map((x) => (
+                      <div key={x.mes} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#5a6b6d" }}>
+                        <span>{x.mes}</span>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(x.monto)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
