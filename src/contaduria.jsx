@@ -47,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v52 · 2026-08-02 · la sesión se renueva sola (refresh token) + desbloqueo biométrico opcional (Mi hogar → Seguridad)
-const APP_VERSION = "v52 · 2026-08-02";
+// v53 · 2026-08-02 · botón de Excel movido al header, a la altura de la versión, extremo derecho
+const APP_VERSION = "v53 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1259,45 +1259,58 @@ export default function FinanzasApp() {
               </div>
             )}
           </div>
-          <div style={{ display: "flex", gap: 6, alignItems: "center", position: "relative" }}>
-            <div title={profileName} style={{
-              width: 28, height: 28, borderRadius: "50%",
-              background: GOLD, color: INK,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 12, fontWeight: 700
-            }}>{profileName?.[0]?.toUpperCase()}</div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", position: "relative" }}>
+              <div title={profileName} style={{
+                width: 28, height: 28, borderRadius: "50%",
+                background: GOLD, color: INK,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 12, fontWeight: 700
+              }}>{profileName?.[0]?.toUpperCase()}</div>
+              <button
+                onClick={() => setMenuOpen((v) => !v)}
+                aria-label="Más opciones"
+                style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, width: 32, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: PAPER }}
+              >
+                <Menu size={16} />
+              </button>
+              {menuOpen && (
+                <>
+                  <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 9 }} />
+                  <div style={{
+                    position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 10, minWidth: 190,
+                    background: "#fff", borderRadius: 8, boxShadow: "0 8px 28px rgba(27,42,46,0.25)",
+                    border: "1px solid #ddd6c4", overflow: "hidden",
+                  }}>
+                    {SECONDARY_TABS.map((key) => (
+                      <button
+                        key={key}
+                        onClick={() => { setTab(key); setMenuOpen(false); }}
+                        style={{
+                          display: "block", width: "100%", textAlign: "left", padding: "11px 16px",
+                          background: tab === key ? PAPER_DIM : "#fff", border: "none", borderBottom: "1px solid #f0ece0",
+                          cursor: "pointer", fontSize: 13.5, fontWeight: tab === key ? 700 : 500,
+                          color: tab === key ? TEAL : INK,
+                        }}
+                      >
+                        {TAB_LABELS[key]}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
             <button
-              onClick={() => setMenuOpen((v) => !v)}
-              aria-label="Más opciones"
-              style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, width: 32, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: PAPER }}
+              onClick={exportarExcel}
+              title="Exportar todos los movimientos a Excel"
+              style={{
+                display: "flex", alignItems: "center", gap: 5, marginTop: 40,
+                background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 6,
+                color: PAPER, fontSize: 10.5, padding: "3px 8px", cursor: "pointer",
+              }}
             >
-              <Menu size={16} />
+              <Download size={12} /> Excel
             </button>
-            {menuOpen && (
-              <>
-                <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 9 }} />
-                <div style={{
-                  position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 10, minWidth: 190,
-                  background: "#fff", borderRadius: 8, boxShadow: "0 8px 28px rgba(27,42,46,0.25)",
-                  border: "1px solid #ddd6c4", overflow: "hidden",
-                }}>
-                  {SECONDARY_TABS.map((key) => (
-                    <button
-                      key={key}
-                      onClick={() => { setTab(key); setMenuOpen(false); }}
-                      style={{
-                        display: "block", width: "100%", textAlign: "left", padding: "11px 16px",
-                        background: tab === key ? PAPER_DIM : "#fff", border: "none", borderBottom: "1px solid #f0ece0",
-                        cursor: "pointer", fontSize: 13.5, fontWeight: tab === key ? 700 : 500,
-                        color: tab === key ? TEAL : INK,
-                      }}
-                    >
-                      {TAB_LABELS[key]}
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
           </div>
         </div>
       </div>
@@ -1352,15 +1365,6 @@ export default function FinanzasApp() {
                     <span style={{ fontSize: 11.5, fontWeight: 700, textAlign: "center", lineHeight: 1.1 }}>{label}</span>
                   </button>
                 ))}
-              </div>
-              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
-                <button
-                  onClick={exportarExcel}
-                  title="Exportar todos los movimientos a Excel"
-                  style={{ ...btnOutline, padding: "8px 12px", fontSize: 12.5 }}
-                >
-                  <Download size={15} /> Excel
-                </button>
               </div>
             </div>
           </>
