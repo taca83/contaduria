@@ -47,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v50 · 2026-08-02 · carga por voz: reconoce "me dieron" e "ingresé" como ingreso
-const APP_VERSION = "v50 · 2026-08-02";
+// v51 · 2026-08-02 · Resumen mensual en celu: 3 meses navegables con flechas; Comparar meses fijo al último año (sin meses futuros)
+const APP_VERSION = "v51 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1503,6 +1503,9 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   const [rango, setRango] = useState(6);
   const [compareMode, setCompareMode] = useState(false);
   const [comparedMonths, setComparedMonths] = useState([]);
+  // Ventana de 3 meses para "Resumen mensual" en el celu, navegable con
+  // flechas — independiente del selector de rango de Evolución de arriba.
+  const [resumenOffset, setResumenOffset] = useState(0);
 
   function calcularMes(key) {
     const [y, m] = key.split("-").map(Number);
@@ -1513,10 +1516,27 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
     return { mes: label, Ingresos: ing, Gastos: gas };
   }
 
+  // Siempre el último año hasta el mes actual (nunca meses futuros, aunque
+  // ya haya movimientos cargados a futuro como la casita de Hebraica).
   const availableMonths = useMemo(() => {
-    const set = new Set(entries.map((e) => monthKey(e.date)).filter(Boolean));
-    return [...set].sort().reverse();
-  }, [entries]);
+    const now = new Date();
+    const months = [];
+    for (let i = 0; i <= 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push(d.toISOString().slice(0, 7));
+    }
+    return months;
+  }, []);
+
+  const resumenMensualMobile = useMemo(() => {
+    const now = new Date();
+    const months = [];
+    for (let i = 2; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - resumenOffset - i, 1);
+      months.push(calcularMes(d.toISOString().slice(0, 7)));
+    }
+    return months;
+  }, [entries, resumenOffset]);
 
   const chartData = useMemo(() => {
     if (compareMode) {
@@ -1688,8 +1708,25 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
       </div>
 
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
-        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Resumen mensual</div>
-        {chartData.length === 0 ? <EmptyState text={compareMode ? "Elegí al menos un mes para comparar." : "Sin datos para este rango."} /> : isDesktop ? (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>Resumen mensual</div>
+          {!isDesktop && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={() => setResumenOffset((v) => v + 3)} aria-label="Meses anteriores" style={{ background: "none", border: "1px solid #ddd6c4", borderRadius: 6, width: 26, height: 26, cursor: "pointer", color: INK }}>◀</button>
+              {resumenOffset > 0 && (
+                <button onClick={() => setResumenOffset(0)} style={{ background: "none", border: `1px solid ${TEAL}`, borderRadius: 6, color: TEAL, fontSize: 11, padding: "3px 8px", cursor: "pointer" }}>Mes actual</button>
+              )}
+              <button
+                onClick={() => setResumenOffset((v) => Math.max(0, v - 3))}
+                disabled={resumenOffset === 0}
+                aria-label="Meses siguientes"
+                style={{ background: "none", border: "1px solid #ddd6c4", borderRadius: 6, width: 26, height: 26, cursor: resumenOffset === 0 ? "default" : "pointer", color: resumenOffset === 0 ? "#ddd6c4" : INK }}
+              >▶</button>
+            </div>
+          )}
+        </div>
+        {isDesktop ? (
+          chartData.length === 0 ? <EmptyState text={compareMode ? "Elegí al menos un mes para comparar." : "Sin datos para este rango."} /> : (
           <div style={{ display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", paddingBottom: 8, borderBottom: "1px solid #eee6d5" }}>
               <div style={{ flex: 1.2 }}>Mes</div>
@@ -1709,12 +1746,12 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
               );
             })}
           </div>
+          )
         ) : (
-          // En el celu, 4 columnas en una fila no entran cómodo con montos
-          // grandes (se cortaban feo) — acá cada mes es su propia tarjeta
-          // con Ingresos/Gastos/Balance apilados.
+          // En el celu: siempre 3 meses fijos, navegables con las flechas
+          // de arriba — independiente del rango elegido en Evolución.
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {[...chartData].reverse().map((m, i) => {
+            {[...resumenMensualMobile].reverse().map((m, i) => {
               const bal = m.Ingresos - m.Gastos;
               return (
                 <div key={i} style={{ border: "1px solid #f2eee2", borderRadius: 8, padding: "10px 12px" }}>
