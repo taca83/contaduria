@@ -26,6 +26,7 @@ const TAB_LABELS = {
   hogar: "Mi hogar",
   categorias: "Categorías",
   recurrentes: "Gastos recurrentes",
+  cuentas: "Cuentas",
   admin: "Panel admin (ingresos a la app)",
 };
 const PRIMARY_TABS = [
@@ -34,7 +35,7 @@ const PRIMARY_TABS = [
   ["rapidos", "Gastos rápidos", Zap],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "presupuestos", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
+const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "presupuestos", "cuentas", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -50,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v62 · 2026-08-03 · botón separado para borrar solo las reglas de categorización aprendidas (menú ☰ → Reiniciar datos)
-const APP_VERSION = "v62 · 2026-08-03";
+// v63 · 2026-08-03 · pestaña "Cuentas": gastos e ingresos diferenciados por tarjeta/cuenta/efectivo
+const APP_VERSION = "v63 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1752,6 +1753,7 @@ export default function FinanzasApp() {
               onDelete={deleteAccesoRapido}
             />
           )}
+          {tab === "cuentas" && <CuentasTab thisMonthEntries={thisMonthEntries} monthLabel={monthLabel(selectedMonth)} />}
           {tab === "admin" && <AdminTab />}
           {tab === "recategorizar" && (
             <RecategorizarTab
@@ -3092,6 +3094,104 @@ function CategoriasTab({ categories, contarUsos, onAdd, onRename, onDelete }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function CuentasTab({ thisMonthEntries, monthLabel }) {
+  const [expandedCuenta, setExpandedCuenta] = useState(null);
+
+  const gastosPorCuenta = useMemo(() => {
+    const map = {};
+    thisMonthEntries
+      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS")
+      .forEach((e) => {
+        const cuenta = (e.account || "").trim() || "Sin cuenta especificada";
+        map[cuenta] = (map[cuenta] || 0) + Number(e.amount);
+      });
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [thisMonthEntries]);
+
+  const ingresosPorCuenta = useMemo(() => {
+    const map = {};
+    thisMonthEntries
+      .filter((e) => e.type === "ingreso" || e.type === "cambio")
+      .forEach((e) => {
+        const cuenta = (e.account || "").trim() || "Sin cuenta especificada";
+        map[cuenta] = (map[cuenta] || 0) + Number(e.amount);
+      });
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [thisMonthEntries]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ fontSize: 12.5, color: "#8a9698" }}>
+        Gastos e ingresos de {monthLabel}, agrupados por tarjeta/cuenta/efectivo — usa el campo "Cuenta" que ya cargás en cada movimiento (Visa BBVA, Mastercard Black, ARQ, Mercado Pago, Efectivo, etc.), así que si tenés más de una tarjeta, cada una aparece por separado.
+      </div>
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Gastos por cuenta</div>
+        {gastosPorCuenta.length === 0 ? <EmptyState text="Todavía no cargaste gastos este mes." /> : (
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ width: 180, height: 180 }}>
+              <ResponsiveContainer>
+                <PieChart>
+                  <Pie data={gastosPorCuenta} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
+                    {gastosPorCuenta.map((_, i) => <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip formatter={(v) => fmtARS(v)} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ flex: 1, minWidth: 160 }}>
+              {gastosPorCuenta.map((c, i) => {
+                const isOpen = expandedCuenta === `gasto-${c.name}`;
+                const movs = isOpen
+                  ? thisMonthEntries
+                      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS" && ((e.account || "").trim() || "Sin cuenta especificada") === c.name)
+                      .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
+                  : [];
+                return (
+                  <div key={c.name}>
+                    <div
+                      onClick={() => setExpandedCuenta(isOpen ? null : `gasto-${c.name}`)}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", cursor: "pointer" }}
+                    >
+                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: CAT_COLORS[i % CAT_COLORS.length], flexShrink: 0 }} />
+                      <div style={{ flex: 1, fontSize: 13 }}>{c.name}</div>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 }}>{fmtARS(c.value)}</div>
+                    </div>
+                    {isOpen && (
+                      <div style={{ marginLeft: 18, marginBottom: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+                        {movs.map((m) => (
+                          <div key={m.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "#5a6b6d" }}>
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{m.desc || m.category}</span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(m.amount)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {ingresosPorCuenta.length > 0 && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Ingresos por cuenta</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {ingresosPorCuenta.map((c) => (
+              <div key={c.name} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "4px 0" }}>
+                <span>{c.name}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: GREEN, fontWeight: 600 }}>{fmtARS(c.value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
