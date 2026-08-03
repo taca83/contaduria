@@ -47,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v46 · 2026-08-02 · set de 10 categorías estándar para hogares nuevos
-const APP_VERSION = "v46 · 2026-08-02";
+// v47 · 2026-08-02 · layout responsive: contenido más ancho y gráficos/presupuestos en grilla en desktop
+const APP_VERSION = "v47 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -471,6 +471,16 @@ export default function FinanzasApp() {
   const [showForm, setShowForm] = useState(false);
   const [formType, setFormType] = useState("gasto");
   const [saving, setSaving] = useState(false);
+
+  // --- Layout responsive: por ahora un único breakpoint (≥900px = desktop) ---
+  // que ensancha el contenido y acomoda algunas secciones en grilla. El resto
+  // de la app sigue igual que en el celu.
+  const [isDesktop, setIsDesktop] = useState(() => (typeof window !== "undefined" ? window.innerWidth >= 900 : false));
+  useEffect(() => {
+    function onResize() { setIsDesktop(window.innerWidth >= 900); }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const [loadError, setLoadError] = useState(null);
 
@@ -1019,7 +1029,7 @@ export default function FinanzasApp() {
 
       {/* Header */}
       <div style={{ background: INK, color: PAPER, padding: "20px 20px 26px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", maxWidth: 720, margin: "0 auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", maxWidth: isDesktop ? 1080 : 720, margin: "0 auto" }}>
           <div>
             <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600 }}>Contaduría</div>
             <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2 }}>
@@ -1085,7 +1095,7 @@ export default function FinanzasApp() {
         </div>
       </div>
 
-      <div style={{ maxWidth: 720, margin: "0 auto", padding: "0 16px" }}>
+      <div style={{ maxWidth: isDesktop ? 1080 : 720, margin: "0 auto", padding: "0 16px" }}>
         {SECONDARY_TABS.includes(tab) ? (
           <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 10 }}>
             <button
@@ -1158,6 +1168,7 @@ export default function FinanzasApp() {
               thisMonthEntries={thisMonthEntries}
               cambiosStats={cambiosStats}
               totalGastosUsd={totalGastosUsd}
+              isDesktop={isDesktop}
             />
           )}
           {tab === "movimientos" && (
@@ -1167,7 +1178,7 @@ export default function FinanzasApp() {
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
           )}
           {tab === "presupuestos" && (
-            <PresupuestosTab budgets={budgets} onUpdate={updateBudgets} gastosPorCategoria={gastosPorCategoria} categories={categories} />
+            <PresupuestosTab budgets={budgets} onUpdate={updateBudgets} gastosPorCategoria={gastosPorCategoria} categories={categories} isDesktop={isDesktop} />
           )}
           {tab === "importar" && (
             <ImportarTab
@@ -1389,7 +1400,7 @@ function DivisasTab({ cambiosStats, cambios, onDelete }) {
   );
 }
 
-function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd }) {
+function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd, isDesktop }) {
   const [expandedCat, setExpandedCat] = useState(null);
   const [rango, setRango] = useState(6);
 
@@ -1417,6 +1428,7 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <div style={isDesktop ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, alignItems: "start" } : { display: "contents" }}>
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Gastos por categoría (este mes)</div>
         {totalGastosUsd > 0 && (
@@ -1506,6 +1518,7 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
             </BarChart>
           </ResponsiveContainer>
         </div>
+      </div>
       </div>
 
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
@@ -1741,7 +1754,7 @@ function AhorrosTab({ entries, onDelete, totalAhorradoHistorico }) {
   );
 }
 
-function PresupuestosTab({ budgets, onUpdate, gastosPorCategoria, categories }) {
+function PresupuestosTab({ budgets, onUpdate, gastosPorCategoria, categories, isDesktop }) {
   const [local, setLocal] = useState(budgets);
   useEffect(() => setLocal(budgets), [budgets]);
 
@@ -1756,6 +1769,7 @@ function PresupuestosTab({ budgets, onUpdate, gastosPorCategoria, categories }) 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 4 }}>Definí un tope mensual por categoría. Se compara contra lo gastado este mes.</div>
+      <div style={isDesktop ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } : { display: "contents" }}>
       {categories.map((cat) => {
         const limit = Number(local[cat]) || 0;
         const spent = gastoMap[cat] || 0;
@@ -1787,6 +1801,7 @@ function PresupuestosTab({ budgets, onUpdate, gastosPorCategoria, categories }) 
           </div>
         );
       })}
+      </div>
     </div>
   );
 }
