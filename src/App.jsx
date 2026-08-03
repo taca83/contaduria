@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
@@ -7,7 +7,7 @@ import {
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
   ArrowUpRight, ArrowDownRight, Landmark, Settings, Trash2, User, Download, Menu,
-  Home, List, Upload, Pencil, Check
+  Home, List, Upload, Pencil, Check, Mic, Square
 } from "lucide-react";
 
 const DEFAULT_GASTO_CATS = ["Comida", "Tarjetas", "Ropa", "Salud", "Educación", "Transporte", "Ocio", "Servicios", "Vivienda", "Otros"];
@@ -47,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v48 · 2026-08-02 · resumen mensual en tarjetas en el celu (sin cortes feos), 3M y comparar meses sueltos en Evolución
-const APP_VERSION = "v48 · 2026-08-02";
+// v49 · 2026-08-02 · carga de gastos/ingresos por voz (grabar + transcribir + extraer datos)
+const APP_VERSION = "v49 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -323,6 +323,60 @@ function parsearFacturaColegio(fullText, overrides = {}) {
   return { filas, avisos };
 }
 
+// Convierte un Blob de audio a base64 (sin el prefijo "data:...;base64,")
+// para poder mandarlo en un body JSON a la Edge Function de transcripción.
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Extrae monto / tipo / categoría / fecha de un texto dictado en español,
+// para precargar el formulario de carga manual. Es heurístico a propósito:
+// el usuario siempre revisa y confirma antes de guardar.
+function extraerDatosDeTexto(texto, categories = []) {
+  const t = (texto || "").toLowerCase();
+
+  let type = "gasto";
+  if (/cobr[ée]|me pagaron|ingreso|deposit[oó]/.test(t)) type = "ingreso";
+  if (/cambi[ée].*d[oó]lar|cambio de d[oó]lares|d[oó]lares?\s+a\s+pesos/.test(t)) type = "cambio";
+
+  let amount = null;
+  const milMatch = t.match(/(\d+(?:[.,]\d+)?)\s*mil\b/);
+  if (milMatch) {
+    amount = Math.round(parseFloat(milMatch[1].replace(",", ".")) * 1000);
+  } else {
+    const numMatch = t.match(/\$?\s?(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?)/);
+    if (numMatch) {
+      const raw = numMatch[1];
+      amount = /\.\d{3}/.test(raw)
+        ? Math.round(parseFloat(raw.replace(/\./g, "").replace(",", ".")))
+        : Math.round(parseFloat(raw.replace(",", ".")));
+    }
+  }
+
+  // Primero probamos si el nombre de alguna categoría del hogar aparece
+  // tal cual dicho en el audio; si no, caemos en las mismas reglas por
+  // palabra clave que se usan para categorizar resúmenes importados.
+  let category = null;
+  for (const c of categories) {
+    if (c && t.includes(c.toLowerCase())) { category = c; break; }
+  }
+  if (!category) category = inferCategory(texto, {}, categories.length ? categories : null);
+
+  let date = todayISO();
+  if (/\bayer\b/.test(t)) {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    date = d.toISOString().slice(0, 10);
+  }
+
+  return { type, amount, category, date, desc: (texto || "").trim() };
+}
+
 function monthKey(dateStr) {
   return dateStr ? dateStr.slice(0, 7) : "";
 }
@@ -385,6 +439,24 @@ async function sbAuth(path, options = {}) {
   const data = await res.json().catch(() => null);
   if (!res.ok) {
     throw new Error(data?.msg || data?.error_description || data?.error || `Auth ${path} → ${res.status}`);
+  }
+  return data;
+}
+
+// Llama a una Edge Function de Supabase (ej. la que transcribe audio).
+async function sbFunction(path, body) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/${path}`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${_accessToken || SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(data?.error || `Función ${path} → ${res.status}`);
   }
   return data;
 }
@@ -470,6 +542,8 @@ export default function FinanzasApp() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [formType, setFormType] = useState("gasto");
+  const [showVoice, setShowVoice] = useState(false);
+  const [voicePrefill, setVoicePrefill] = useState(null);
   const [saving, setSaving] = useState(false);
 
   // --- Layout responsive: por ahora un único breakpoint (≥900px = desktop) ---
@@ -1284,6 +1358,17 @@ export default function FinanzasApp() {
 
       {/* FAB */}
       <button
+        onClick={() => setShowVoice(true)}
+        style={{
+          position: "fixed", bottom: 22, right: 88, width: 48, height: 48, borderRadius: "50%",
+          background: "#fff", color: TEAL, border: `1.5px solid ${TEAL}`, boxShadow: "0 4px 14px rgba(27,42,46,0.15)",
+          display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10
+        }}
+        aria-label="Cargar movimiento por voz"
+      >
+        <Mic size={20} />
+      </button>
+      <button
         onClick={() => setShowForm(true)}
         style={{
           position: "fixed", bottom: 22, right: 22, width: 56, height: 56, borderRadius: "50%",
@@ -1295,12 +1380,25 @@ export default function FinanzasApp() {
         <Plus size={26} />
       </button>
 
+      {showVoice && (
+        <VoiceEntryModal
+          categories={categories}
+          onClose={() => setShowVoice(false)}
+          onExtracted={(datos) => {
+            setVoicePrefill(datos);
+            setShowVoice(false);
+            setShowForm(true);
+          }}
+        />
+      )}
+
       {showForm && (
         <EntryForm
-          onClose={() => setShowForm(false)}
-          onSave={async (entry) => { setSaving(true); await addEntry(entry); setSaving(false); setShowForm(false); }}
+          onClose={() => { setShowForm(false); setVoicePrefill(null); }}
+          onSave={async (entry) => { setSaving(true); await addEntry(entry); setSaving(false); setShowForm(false); setVoicePrefill(null); }}
           saving={saving}
           categories={categories}
+          initialData={voicePrefill}
         />
       )}
     </div>
@@ -2843,12 +2941,138 @@ function RecategorizarTab({ entries, onApply, categories }) {
   );
 }
 
-function EntryForm({ onClose, onSave, saving, categories }) {
-  const [type, setType] = useState("gasto");
-  const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState(categories[0]);
-  const [desc, setDesc] = useState("");
-  const [date, setDate] = useState(todayISO());
+function VoiceEntryModal({ onClose, onExtracted, categories }) {
+  const [recording, setRecording] = useState(false);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [transcribing, setTranscribing] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [error, setError] = useState(null);
+  const mediaRecorderRef = useRef(null);
+  const chunksRef = useRef([]);
+  const blobRef = useRef(null);
+  const streamRef = useRef(null);
+
+  useEffect(() => {
+    return () => { streamRef.current?.getTracks().forEach((t) => t.stop()); };
+  }, []);
+
+  async function startRecording() {
+    setError(null);
+    setTranscript("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : (MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "");
+      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      chunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: mr.mimeType || "audio/webm" });
+        blobRef.current = blob;
+        setAudioUrl(URL.createObjectURL(blob));
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      mediaRecorderRef.current = mr;
+      mr.start();
+      setRecording(true);
+    } catch (e) {
+      setError("No pude acceder al micrófono: " + e.message);
+    }
+  }
+
+  function stopRecording() {
+    mediaRecorderRef.current?.stop();
+    setRecording(false);
+  }
+
+  function grabarDeNuevo() {
+    setAudioUrl(null);
+    blobRef.current = null;
+    setTranscript("");
+    setError(null);
+  }
+
+  async function transcribir() {
+    if (!blobRef.current) return;
+    setTranscribing(true);
+    setError(null);
+    try {
+      const audio_base64 = await blobToBase64(blobRef.current);
+      const data = await sbFunction("transcribir-audio", { audio_base64, mime_type: blobRef.current.type });
+      setTranscript(data.text || "");
+    } catch (e) {
+      setError("No pude transcribir el audio: " + e.message);
+    }
+    setTranscribing(false);
+  }
+
+  function usarTranscripcion() {
+    onExtracted(extraerDatosDeTexto(transcript, categories));
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: "flex-end", zIndex: 25 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: "100%", borderRadius: "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>Cargar por voz</div>
+          <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer" }} aria-label="Cerrar"><X size={22} /></button>
+        </div>
+        <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 16 }}>
+          Grabá diciendo el gasto o ingreso ("gasté 15 mil en el supermercado con la visa"), transcribilo y revisá los datos antes de guardar.
+        </div>
+
+        {error && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
+
+        {!audioUrl ? (
+          <button
+            onClick={recording ? stopRecording : startRecording}
+            style={{
+              ...btnPrimary, width: "100%", justifyContent: "center", padding: "14px",
+              background: recording ? BRICK : TEAL,
+            }}
+          >
+            {recording ? <Square size={18} /> : <Mic size={18} />}
+            {recording ? "Detener grabación" : "Grabar"}
+          </button>
+        ) : (
+          <>
+            <audio controls src={audioUrl} style={{ width: "100%", marginBottom: 12 }} />
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              <button onClick={grabarDeNuevo} style={{ ...btnOutline, flex: 1, justifyContent: "center" }}>Grabar de nuevo</button>
+              <button onClick={transcribir} disabled={transcribing} style={{ ...btnPrimary, flex: 1, justifyContent: "center" }}>
+                {transcribing ? "Transcribiendo..." : "Transcribir"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {transcript && (
+          <>
+            <label style={labelStyle}>Texto transcripto (editalo si hace falta)</label>
+            <textarea
+              value={transcript}
+              onChange={(e) => setTranscript(e.target.value)}
+              rows={3}
+              style={{ ...inputStyle, marginBottom: 14, resize: "vertical" }}
+            />
+            <button onClick={usarTranscripcion} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
+              Usar este texto para cargar el movimiento
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EntryForm({ onClose, onSave, saving, categories, initialData }) {
+  const [type, setType] = useState(initialData?.type || "gasto");
+  const [amount, setAmount] = useState(initialData?.amount != null ? String(initialData.amount) : "");
+  const [category, setCategory] = useState(initialData?.category || categories[0]);
+  const [desc, setDesc] = useState(initialData?.desc || "");
+  const [date, setDate] = useState(initialData?.date || todayISO());
   const [usdAmount, setUsdAmount] = useState("");
   const [rate, setRate] = useState("");
   const [account, setAccount] = useState("");
@@ -2857,7 +3081,12 @@ function EntryForm({ onClose, onSave, saving, categories }) {
   const cats = type === "gasto" ? categories : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR;
   const arsFromCambio = (Number(usdAmount) || 0) * (Number(rate) || 0);
 
+  // Al montar con datos precargados (dictado por voz) no queremos que este
+  // efecto pise la categoría ya elegida — solo debe correr cuando el usuario
+  // cambia el tipo a mano, de ahí el guard con el ref.
+  const yaMontado = useRef(false);
   useEffect(() => {
+    if (!yaMontado.current) { yaMontado.current = true; return; }
     setCategory((type === "gasto" ? categories : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR)[0]);
   }, [type]);
 
