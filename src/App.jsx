@@ -47,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v49 · 2026-08-02 · carga de gastos/ingresos por voz (grabar + transcribir + extraer datos)
-const APP_VERSION = "v49 · 2026-08-02";
+// v50 · 2026-08-02 · carga por voz: reconoce "me dieron" e "ingresé" como ingreso
+const APP_VERSION = "v50 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -341,7 +341,7 @@ function extraerDatosDeTexto(texto, categories = []) {
   const t = (texto || "").toLowerCase();
 
   let type = "gasto";
-  if (/cobr[ée]|me pagaron|ingreso|deposit[oó]/.test(t)) type = "ingreso";
+  if (/cobr[ée]|me (dieron|pagaron)|ingres[eé]|deposit[eéoó]|recib[ií]/.test(t)) type = "ingreso";
   if (/cambi[ée].*d[oó]lar|cambio de d[oó]lares|d[oó]lares?\s+a\s+pesos/.test(t)) type = "cambio";
 
   let amount = null;
