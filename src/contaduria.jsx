@@ -26,7 +26,7 @@ const TAB_LABELS = {
   hogar: "Mi hogar",
   categorias: "Categorías",
   recurrentes: "Gastos recurrentes",
-  admin: "Panel admin (todos los hogares)",
+  admin: "Panel admin (ingresos a la app)",
 };
 const PRIMARY_TABS = [
   ["resumen", "Resumen", Home],
@@ -50,8 +50,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v58 · 2026-08-02 · panel admin cross-hogar (ingresos por hogar/persona), acceso restringido vía app_admins + RPC del lado del servidor
-const APP_VERSION = "v58 · 2026-08-02";
+// v60 · 2026-08-02 · vincular WhatsApp (Mi hogar) para cargar datos y preguntarle al bot vía el webhook de Meta Cloud API
+const APP_VERSION = "v60 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -664,6 +664,7 @@ export default function FinanzasApp() {
   const [categories, setCategories] = useState(DEFAULT_GASTO_CATS);
   const [recurrentes, setRecurrentes] = useState([]);
   const [esAdmin, setEsAdmin] = useState(false);
+  const [whatsappLinks, setWhatsappLinks] = useState([]);
   const [accesosRapidos, setAccesosRapidos] = useState([]);
   const [ultimoAccesoRegistrado, setUltimoAccesoRegistrado] = useState(null);
   const [tab, setTab] = useState("resumen");
@@ -754,13 +755,14 @@ export default function FinanzasApp() {
     const hh = miembro[0];
     setHouseholdId(hh.household_id);
     setProfileName(hh.display_name);
-    const [entRows, budRows, ovrRows, catRows, recRows, rapRows] = await Promise.all([
+    const [entRows, budRows, ovrRows, catRows, recRows, rapRows, waRows] = await Promise.all([
       sb(`entries?household_id=eq.${hh.household_id}&select=*&order=date.desc`),
       sb(`budgets?household_id=eq.${hh.household_id}&select=*`),
       sb(`category_overrides?household_id=eq.${hh.household_id}&select=*`),
       sb(`categories?household_id=eq.${hh.household_id}&select=name&order=name.asc`),
       sb(`recurring_entries?household_id=eq.${hh.household_id}&select=*`),
       sb(`quick_entries?household_id=eq.${hh.household_id}&select=*&order=sort_order.asc`),
+      sb(`whatsapp_links?household_id=eq.${hh.household_id}&select=*`),
     ]);
     const entriesCargadas = (entRows || []).map(entryFromDb);
     setEntries(entriesCargadas);
@@ -774,6 +776,7 @@ export default function FinanzasApp() {
     const recurrentesCargadas = recRows || [];
     setRecurrentes(recurrentesCargadas);
     setAccesosRapidos(rapRows || []);
+    setWhatsappLinks(waRows || []);
     setTab("resumen");
     setLoading(false);
     generarRecurrentesDelMes(recurrentesCargadas, entriesCargadas, hh.household_id, hh.display_name)
@@ -781,6 +784,8 @@ export default function FinanzasApp() {
     sb("rpc/soy_admin", { method: "POST", body: "{}" })
       .then((v) => setEsAdmin(Boolean(v)))
       .catch(() => setEsAdmin(false)); // función vieja/inexistente en Supabase → no es admin, sin romper nada
+    sb("login_events", { method: "POST", body: JSON.stringify([{ household_id: hh.household_id, display_name: hh.display_name }]) })
+      .catch((e) => console.error("No se pudo registrar el ingreso a la app", e));
   }
 
   // Si algún gasto/ingreso recurrente activo ya "llegó" (hoy >= día
@@ -1199,6 +1204,29 @@ export default function FinanzasApp() {
     setAccesosRapidos(next);
     if (!HAS_SUPABASE) { mockSaveAccesosRapidos(next); return; }
     await sb(`quick_entries?id=eq.${id}`, { method: "DELETE" });
+  }
+
+  async function addWhatsappLink(phoneRaw, nombre) {
+    const phone = (phoneRaw || "").replace(/[^\d]/g, ""); // solo dígitos, formato E.164 sin "+"
+    if (!phone || phone.length < 10) return { error: "Poné el número completo, con código de país (ej: 5491122334455)." };
+    if (!HAS_SUPABASE) return { error: "No aplica en vista previa local." };
+    try {
+      const nuevo = await sb("whatsapp_links", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify([{ household_id: householdId, phone_number: phone, display_name: nombre || profileName }]),
+      });
+      setWhatsappLinks((prev) => [...prev, ...(nuevo || [])]);
+      return { ok: true };
+    } catch (e) {
+      return { error: e.message.includes("duplicate") ? "Ese número ya está vinculado." : "No se pudo vincular: " + e.message };
+    }
+  }
+
+  async function deleteWhatsappLink(id) {
+    setWhatsappLinks((prev) => prev.filter((w) => w.id !== id));
+    if (!HAS_SUPABASE) return;
+    await sb(`whatsapp_links?id=eq.${id}`, { method: "DELETE" });
   }
 
   // Un toque en un acceso rápido carga el gasto ya, con la fecha de hoy —
@@ -1692,6 +1720,10 @@ export default function FinanzasApp() {
               onDesactivarBiometria={desactivarBiometria}
               bioBusy={bioBusy}
               bioError={bioError}
+              whatsappLinks={whatsappLinks}
+              profileName={profileName}
+              onAddWhatsapp={addWhatsappLink}
+              onDeleteWhatsapp={deleteWhatsappLink}
             />
           )}
           {tab === "categorias" && (
@@ -2780,11 +2812,15 @@ function ImportarTab({ onImport, categoryOverrides }) {
   );
 }
 
-function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, onActivarBiometria, onDesactivarBiometria, bioBusy, bioError }) {
+function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, onActivarBiometria, onDesactivarBiometria, bioBusy, bioError, whatsappLinks, profileName, onAddWhatsapp, onDeleteWhatsapp }) {
   const [hh, setHh] = useState(null);
   const [miembros, setMiembros] = useState(null);
   const [copiado, setCopiado] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState(null);
+  const [waNumero, setWaNumero] = useState("");
+  const [waNombre, setWaNombre] = useState(profileName || "");
+  const [waBusy, setWaBusy] = useState(false);
+  const [waError, setWaError] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -2827,6 +2863,15 @@ function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, 
     navigator.clipboard?.writeText(hh.invite_code);
     setCopiado(true);
     setTimeout(() => setCopiado(false), 2000);
+  }
+
+  async function handleAddWhatsapp() {
+    setWaError(null);
+    setWaBusy(true);
+    const res = await onAddWhatsapp(waNumero, waNombre);
+    setWaBusy(false);
+    if (res?.error) { setWaError(res.error); return; }
+    setWaNumero("");
   }
 
   return (
@@ -2910,6 +2955,39 @@ function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, 
               </button>
             </>
           )}
+        </div>
+      )}
+
+      {HAS_SUPABASE && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>WhatsApp</div>
+          <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 14 }}>
+            Vinculá tu número para cargar gastos/ingresos escribiéndole o mandándole un audio al bot, y para preguntarle cosas como "cuánto gasté en comida este mes?".
+          </div>
+
+          {whatsappLinks && whatsappLinks.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+              {whatsappLinks.map((w) => (
+                <div key={w.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: PAPER_DIM, borderRadius: 8, padding: "8px 12px" }}>
+                  <span style={{ fontSize: 13 }}>
+                    <b>{w.display_name}</b> · +{w.phone_number}
+                  </span>
+                  <button onClick={() => onDeleteWhatsapp(w.id)} style={{ background: "none", border: "none", cursor: "pointer", color: BRICK }}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <label style={labelStyle}>Tu número (con código de país, sin +)</label>
+          <input value={waNumero} onChange={(e) => setWaNumero(e.target.value)} placeholder="Ej: 5491122334455" style={{ ...inputStyle, marginBottom: 10 }} />
+          <label style={labelStyle}>Nombre (para saber que sos vos)</label>
+          <input value={waNombre} onChange={(e) => setWaNombre(e.target.value)} placeholder="Ej: Hernán" style={{ ...inputStyle, marginBottom: 10 }} />
+          {waError && <div style={{ color: BRICK, fontSize: 12, marginBottom: 10 }}>{waError}</div>}
+          <button onClick={handleAddWhatsapp} disabled={waBusy || !waNumero.trim()} style={{ ...btnPrimary, justifyContent: "center", width: "100%" }}>
+            {waBusy ? "Vinculando..." : "Vincular número"}
+          </button>
         </div>
       )}
 
@@ -3024,7 +3102,7 @@ function AdminTab() {
   useEffect(() => {
     (async () => {
       try {
-        const rows = await sb("rpc/admin_resumen_ingresos", { method: "POST", body: "{}" });
+        const rows = await sb("rpc/admin_resumen_logins", { method: "POST", body: "{}" });
         setFilas(rows || []);
       } catch (e) {
         setError(e.message || "No se pudo cargar.");
@@ -3033,49 +3111,63 @@ function AdminTab() {
     })();
   }, []);
 
+  function fmtFecha(iso) {
+    return new Date(iso).toLocaleString("es-AR", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
   if (cargando) return <div style={{ fontSize: 13, color: "#8a9698" }}>Cargando...</div>;
   if (error) return <div style={{ color: BRICK, fontSize: 13 }}>No se pudo cargar el panel admin: {error}</div>;
-  if (!filas || filas.length === 0) return <EmptyState text="Todavía no hay ingresos cargados en ningún hogar." />;
+  if (!filas || filas.length === 0) return <EmptyState text="Todavía no hay ingresos a la app registrados en ningún hogar." />;
 
-  // Agrupamos hogar -> persona -> [{mes, monto}]
+  // Agrupamos hogar -> persona -> [fechas de ingreso]
   const hogares = {};
   filas.forEach((f) => {
     if (!hogares[f.household_id]) hogares[f.household_id] = { nombre: f.household_name, personas: {} };
     const persona = f.member_name || "(sin nombre)";
-    if (!hogares[f.household_id].personas[persona]) hogares[f.household_id].personas[persona] = { total: 0, meses: [] };
-    hogares[f.household_id].personas[persona].total += Number(f.total_ingresos);
-    hogares[f.household_id].personas[persona].meses.push({ mes: f.mes, monto: Number(f.total_ingresos) });
+    if (!hogares[f.household_id].personas[persona]) hogares[f.household_id].personas[persona] = [];
+    hogares[f.household_id].personas[persona].push(f.login_at);
   });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ fontSize: 12.5, color: "#8a9698" }}>
-        Ingresos totales por hogar y persona (todos los hogares que usan la app). Acceso restringido a administradores — nadie más ve esta pestaña.
+        Ingresos a la app (logins) por hogar y persona — el más reciente de cada uno queda destacado, el resto se puede desplegar. Acceso restringido a administradores.
       </div>
       {Object.entries(hogares).map(([hhId, hh]) => (
         <div key={hhId} style={{ background: "#fff", borderRadius: 10, padding: 16, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, marginBottom: 6 }}>{hh.nombre}</div>
-          {Object.entries(hh.personas).map(([nombre, p]) => {
+          {Object.entries(hh.personas).map(([nombre, logins]) => {
+            const ordenados = [...logins].sort((a, b) => new Date(b) - new Date(a));
+            const ultimo = ordenados[0];
+            const resto = ordenados.slice(1);
             const key = `${hhId}-${nombre}`;
             const abierto = expandido === key;
             return (
               <div key={key} style={{ borderTop: "1px solid #f0ece0", paddingTop: 8, marginTop: 8 }}>
-                <div onClick={() => setExpandido(abierto ? null : key)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ fontSize: 13.5, fontWeight: 600 }}>{nombre}</span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: GREEN, fontWeight: 700 }}>{fmtARS(p.total)}</span>
-                    <span style={{ fontSize: 10, color: "#8a9698" }}>{abierto ? "▲" : "▼"}</span>
-                  </span>
+                  <span style={{ fontSize: 11, color: "#8a9698" }}>{ordenados.length} ingreso{ordenados.length === 1 ? "" : "s"}</span>
                 </div>
-                {abierto && (
-                  <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}>
-                    {[...p.meses].sort((a, b) => b.mes.localeCompare(a.mes)).map((x) => (
-                      <div key={x.mes} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#5a6b6d" }}>
-                        <span>{x.mes}</span>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(x.monto)}</span>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+                  <span style={{ fontSize: 12, color: "#8a9698" }}>Último ingreso</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: TEAL, fontWeight: 700, fontSize: 13 }}>{fmtFecha(ultimo)}</span>
+                </div>
+                {resto.length > 0 && (
+                  <>
+                    <button
+                      onClick={() => setExpandido(abierto ? null : key)}
+                      style={{ background: "none", border: "none", color: "#8a9698", fontSize: 11.5, cursor: "pointer", padding: "6px 0", textDecoration: "underline" }}
+                    >
+                      {abierto ? "Ocultar anteriores" : `Ver ${resto.length} ingreso${resto.length === 1 ? "" : "s"} anterior${resto.length === 1 ? "" : "es"}`}
+                    </button>
+                    {abierto && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 2 }}>
+                        {resto.map((l, i) => (
+                          <div key={i} style={{ fontSize: 11.5, color: "#5a6b6d" }}>{fmtFecha(l)}</div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
+                    )}
+                  </>
                 )}
               </div>
             );
