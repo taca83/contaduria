@@ -49,12 +49,62 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v55 · 2026-08-02 · rename a "Finanzas del hogar" + Gastos rápidos (reemplaza Presupuestos en el menú grande, Presupuestos pasa al menú chico)
-const APP_VERSION = "v55 · 2026-08-02";
+// v56 · 2026-08-02 · modo calculadora en el Monto de Nuevo movimiento (1500+320, 8400/2, etc.)
+const APP_VERSION = "v56 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
   return v.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
+}
+
+// Evalúa expresiones simples tipo calculadora en el campo de Monto
+// ("1500+320", "8400/2"). Es un parser propio (+ - * / paréntesis) — nunca
+// usa eval, y devuelve null si el texto no es una expresión numérica válida.
+function evaluarExpresion(texto) {
+  const limpio = (texto || "").replace(/,/g, ".").trim();
+  if (!limpio) return null;
+  if (!/^[\d+\-*/().\s]+$/.test(limpio)) return null;
+  let i = 0;
+  function parseExpr() {
+    let v = parseTerm();
+    while (limpio[i] === "+" || limpio[i] === "-") {
+      const op = limpio[i]; i++;
+      v = op === "+" ? v + parseTerm() : v - parseTerm();
+    }
+    return v;
+  }
+  function parseTerm() {
+    let v = parseFactor();
+    while (limpio[i] === "*" || limpio[i] === "/") {
+      const op = limpio[i]; i++;
+      v = op === "*" ? v * parseFactor() : v / parseFactor();
+    }
+    return v;
+  }
+  function parseFactor() {
+    while (limpio[i] === " ") i++;
+    if (limpio[i] === "(") {
+      i++;
+      const v = parseExpr();
+      while (limpio[i] === " ") i++;
+      if (limpio[i] === ")") i++;
+      return v;
+    }
+    if (limpio[i] === "-") { i++; return -parseFactor(); }
+    const start = i;
+    while (i < limpio.length && /[\d.]/.test(limpio[i])) i++;
+    if (start === i) throw new Error("expresión inválida");
+    return parseFloat(limpio.slice(start, i));
+  }
+  try {
+    while (limpio[i] === " ") i++;
+    const resultado = parseExpr();
+    while (limpio[i] === " ") i++;
+    if (i !== limpio.length || !isFinite(resultado)) return null;
+    return resultado;
+  } catch {
+    return null;
+  }
 }
 // --- Categorización automática por palabra clave (mismas reglas que
 // venimos aplicando a mano en los resúmenes de BBVA) ---
@@ -3740,6 +3790,8 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
 
   const cats = type === "gasto" ? categories : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR;
   const arsFromCambio = (Number(usdAmount) || 0) * (Number(rate) || 0);
+  const tieneOperador = /[+\-*/()]/.test(amount);
+  const montoCalculado = evaluarExpresion(amount);
 
   // Al montar con datos precargados (dictado por voz) no queremos que este
   // efecto pise la categoría ya elegida — solo debe correr cuando el usuario
@@ -3750,6 +3802,10 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
     setCategory((type === "gasto" ? categories : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR)[0]);
   }, [type]);
 
+  function agregarOperador(op) {
+    setAmount((prev) => prev + op);
+  }
+
   function handleSubmit() {
     if (type === "cambio") {
       if (!usdAmount || Number(usdAmount) <= 0 || !rate || Number(rate) <= 0) return;
@@ -3759,8 +3815,8 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
       });
       return;
     }
-    if (!amount || Number(amount) <= 0) return;
-    onSave({ type, amount: Number(amount), category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS" });
+    if (!montoCalculado || montoCalculado <= 0) return;
+    onSave({ type, amount: montoCalculado, category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS" });
   }
 
   return (
@@ -3813,7 +3869,33 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
               </>
             )}
             <label style={labelStyle}>Monto ({moneda === "USD" ? "USD" : "ARS"})</label>
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 14, fontSize: 20, fontFamily: "'IBM Plex Mono', monospace" }} autoFocus />
+            <input
+              type="text"
+              inputMode="decimal"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0"
+              style={{ ...inputStyle, marginBottom: 8, fontSize: 20, fontFamily: "'IBM Plex Mono', monospace" }}
+              autoFocus
+            />
+            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+              {["+", "-", "*", "/"].map((op) => (
+                <button
+                  key={op}
+                  type="button"
+                  onClick={() => agregarOperador(op)}
+                  style={{ flex: 1, padding: "7px 0", borderRadius: 6, border: "1px solid #ddd6c4", background: "#fff", color: TEAL, fontWeight: 700, fontSize: 15, cursor: "pointer" }}
+                >
+                  {op === "*" ? "×" : op === "/" ? "÷" : op}
+                </button>
+              ))}
+            </div>
+            {tieneOperador && (
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14, color: montoCalculado != null ? TEAL : BRICK }}>
+                {montoCalculado != null ? `= ${fmtARS(montoCalculado)}` : "Expresión inválida"}
+              </div>
+            )}
+            {!tieneOperador && <div style={{ marginBottom: 8 }} />}
 
             <label style={labelStyle}>{type === "ahorro" ? "Instrumento" : "Categoría"}</label>
             <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }}>
