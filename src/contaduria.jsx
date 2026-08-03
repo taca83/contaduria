@@ -51,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v69 · 2026-08-03 · botón central único (flotando sobre la barra, estilo QR de Mercado Pago) que despliega cámara/voz/manual
-const APP_VERSION = "v69 · 2026-08-03";
+// v70 · 2026-08-03 · las 3 opciones del botón central (manual/voz/foto) ahora tienen el mismo ancho fijo, prolijas y alineadas
+const APP_VERSION = "v70 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1854,8 +1854,8 @@ export default function FinanzasApp() {
               key={key}
               onClick={() => { setShowAddMenu(false); accion(); }}
               style={{
-                display: "flex", alignItems: "center", gap: 10, padding: "10px 18px 10px 14px",
-                background: "#fff", border: "none", borderRadius: 30, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 10, padding: "10px 16px 10px 14px",
+                width: 210, background: "#fff", border: "none", borderRadius: 30, cursor: "pointer",
                 boxShadow: "0 4px 14px rgba(27,42,46,0.2)", whiteSpace: "nowrap",
               }}
             >
