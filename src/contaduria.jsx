@@ -24,6 +24,7 @@ const TAB_LABELS = {
   reset: "Reiniciar datos",
   hogar: "Mi hogar",
   categorias: "Categorías",
+  recurrentes: "Gastos recurrentes",
 };
 const PRIMARY_TABS = [
   ["resumen", "Resumen", Home],
@@ -31,7 +32,7 @@ const PRIMARY_TABS = [
   ["presupuestos", "Presupuestos", Target],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["hogar", "categorias", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
+const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -47,8 +48,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v53 · 2026-08-02 · botón de Excel movido al header, a la altura de la versión, extremo derecho
-const APP_VERSION = "v53 · 2026-08-02";
+// v54 · 2026-08-02 · gastos/ingresos recurrentes con auto-carga mensual (pestaña nueva "Gastos recurrentes")
+const APP_VERSION = "v54 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -528,6 +529,8 @@ function entryFromDb(row) {
     usdAmount: row.usd_amount != null ? Number(row.usd_amount) : undefined,
     rate: row.rate != null ? Number(row.rate) : undefined,
     moneda: row.moneda || "ARS",
+    recurringId: row.recurring_id || undefined,
+    generatedMonth: row.generated_month || undefined,
   };
 }
 // Mapea un entry de la app al shape de la tabla `entries` (Supabase)
@@ -544,6 +547,8 @@ function entryToDb(e) {
     usd_amount: e.usdAmount != null ? Number(e.usdAmount) : null,
     rate: e.rate != null ? Number(e.rate) : null,
     moneda: e.moneda || "ARS",
+    recurring_id: e.recurringId || null,
+    generated_month: e.generatedMonth || null,
   };
 }
 
@@ -574,6 +579,7 @@ function mockLoad() {
     names: safeGet("mock_names") || [],
     overrides: safeGet("mock_overrides") || {},
     categories: safeGet("mock_categories") || DEFAULT_GASTO_CATS,
+    recurrentes: safeGet("mock_recurrentes") || [],
   };
 }
 function mockSaveEntries(entries) { safeSet("mock_entries", entries); }
@@ -581,6 +587,7 @@ function mockSaveCategories(categories) { safeSet("mock_categories", categories)
 function mockSaveBudgets(budgets) { safeSet("mock_budgets", budgets); }
 function mockSaveNames(names) { safeSet("mock_names", names); }
 function mockSaveOverrides(overrides) { safeSet("mock_overrides", overrides); }
+function mockSaveRecurrentes(recurrentes) { safeSet("mock_recurrentes", recurrentes); }
 
 export default function FinanzasApp() {
   const [loading, setLoading] = useState(true);
@@ -591,6 +598,7 @@ export default function FinanzasApp() {
   const [budgets, setBudgets] = useState({});
   const [categoryOverrides, setCategoryOverrides] = useState({});
   const [categories, setCategories] = useState(DEFAULT_GASTO_CATS);
+  const [recurrentes, setRecurrentes] = useState([]);
   const [tab, setTab] = useState("resumen");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -679,13 +687,15 @@ export default function FinanzasApp() {
     const hh = miembro[0];
     setHouseholdId(hh.household_id);
     setProfileName(hh.display_name);
-    const [entRows, budRows, ovrRows, catRows] = await Promise.all([
+    const [entRows, budRows, ovrRows, catRows, recRows] = await Promise.all([
       sb(`entries?household_id=eq.${hh.household_id}&select=*&order=date.desc`),
       sb(`budgets?household_id=eq.${hh.household_id}&select=*`),
       sb(`category_overrides?household_id=eq.${hh.household_id}&select=*`),
       sb(`categories?household_id=eq.${hh.household_id}&select=name&order=name.asc`),
+      sb(`recurring_entries?household_id=eq.${hh.household_id}&select=*`),
     ]);
-    setEntries((entRows || []).map(entryFromDb));
+    const entriesCargadas = (entRows || []).map(entryFromDb);
+    setEntries(entriesCargadas);
     const budObj = {};
     (budRows || []).forEach((b) => { budObj[b.category] = Number(b.limit_amount); });
     setBudgets(budObj);
@@ -693,8 +703,43 @@ export default function FinanzasApp() {
     (ovrRows || []).forEach((o) => { ovrObj[o.desc_key] = o.category; });
     setCategoryOverrides(ovrObj);
     setCategories((catRows || []).map((c) => c.name).length > 0 ? catRows.map((c) => c.name) : DEFAULT_GASTO_CATS);
+    const recurrentesCargadas = recRows || [];
+    setRecurrentes(recurrentesCargadas);
     setTab("resumen");
     setLoading(false);
+    generarRecurrentesDelMes(recurrentesCargadas, entriesCargadas, hh.household_id, hh.display_name)
+      .catch((e) => console.error("No se pudieron generar los recurrentes del mes", e));
+  }
+
+  // Si algún gasto/ingreso recurrente activo ya "llegó" (hoy >= día
+  // configurado) y todavía no se generó su movimiento para este mes, lo
+  // crea. Se corre cada vez que se abre la app — no hay un cron en el
+  // servidor, así que el movimiento aparece la primera vez que alguien
+  // entra a la app en el día correspondiente (o después).
+  async function generarRecurrentesDelMes(recurrentesList, entriesList, hhId, nombre) {
+    const hoy = new Date();
+    const mesActual = hoy.toISOString().slice(0, 7);
+    const diaHoy = hoy.getDate();
+    const nuevas = [];
+    for (const r of recurrentesList) {
+      if (!r.activo) continue;
+      if (diaHoy < r.dia_mes) continue;
+      const yaExiste = entriesList.some((e) => e.recurringId === r.id && e.generatedMonth === mesActual);
+      if (yaExiste) continue;
+      const fecha = `${mesActual}-${String(r.dia_mes).padStart(2, "0")}`;
+      nuevas.push({
+        id: uid(), type: r.type, category: r.category, amount: Number(r.amount),
+        desc: r.descripcion || "", date: fecha, account: r.account || "", moneda: r.moneda || "ARS",
+        who: nombre, recurringId: r.id, generatedMonth: mesActual,
+      });
+    }
+    if (nuevas.length === 0) return;
+    setEntries((prev) => [...nuevas, ...prev]);
+    if (!HAS_SUPABASE) {
+      mockSaveEntries([...nuevas, ...entriesList]);
+      return;
+    }
+    await sb("entries", { method: "POST", body: JSON.stringify(nuevas.map((n) => ({ ...entryToDb(n), household_id: hhId }))) });
   }
 
   useEffect(() => {
@@ -707,7 +752,10 @@ export default function FinanzasApp() {
         setBudgets(mock.budgets);
         setCategoryOverrides(mock.overrides);
         setCategories(mock.categories);
+        setRecurrentes(mock.recurrentes);
         setLoading(false);
+        generarRecurrentesDelMes(mock.recurrentes, mock.entries, null, prof?.name)
+          .catch((e) => console.error("No se pudieron generar los recurrentes del mes", e));
         return;
       }
       try {
@@ -827,6 +875,7 @@ export default function FinanzasApp() {
     setEntries([]);
     setBudgets({});
     setCategoryOverrides({});
+    setRecurrentes([]);
     setAuthMode("login");
   }
 
@@ -964,10 +1013,12 @@ export default function FinanzasApp() {
     setEntries([]);
     setBudgets({});
     setCategoryOverrides({});
+    setRecurrentes([]);
     if (!HAS_SUPABASE) {
       mockSaveEntries([]);
       mockSaveBudgets({});
       mockSaveOverrides({});
+      mockSaveRecurrentes([]);
       safeSet("mock_audit_log", []);
       return;
     }
@@ -975,6 +1026,7 @@ export default function FinanzasApp() {
       sb("entries?id=not.is.null", { method: "DELETE" }),
       sb("budgets?category=not.is.null", { method: "DELETE" }),
       sb("category_overrides?desc_key=not.is.null", { method: "DELETE" }),
+      sb("recurring_entries?id=not.is.null", { method: "DELETE" }),
       sb("audit_log?id=not.is.null", { method: "DELETE" }),
     ]);
   }
@@ -986,6 +1038,45 @@ export default function FinanzasApp() {
     if (rows.length > 0) {
       await sb("budgets", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify(rows) });
     }
+  }
+
+  async function addRecurrente(datos) {
+    const nuevo = {
+      id: uid(),
+      type: datos.type,
+      category: datos.category,
+      amount: Number(datos.amount) || 0,
+      descripcion: datos.desc || "",
+      account: datos.account || "",
+      moneda: datos.moneda || "ARS",
+      dia_mes: Number(datos.diaMes) || 1,
+      activo: true,
+    };
+    const next = [...recurrentes, nuevo];
+    setRecurrentes(next);
+    if (!HAS_SUPABASE) { mockSaveRecurrentes(next); return; }
+    await sb("recurring_entries", { method: "POST", body: JSON.stringify([{ ...nuevo, household_id: householdId }]) });
+  }
+
+  async function toggleActivoRecurrente(id, activo) {
+    const next = recurrentes.map((r) => (r.id === id ? { ...r, activo } : r));
+    setRecurrentes(next);
+    if (!HAS_SUPABASE) { mockSaveRecurrentes(next); return; }
+    await sb(`recurring_entries?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ activo }) });
+  }
+
+  async function editMontoRecurrente(id, amount) {
+    const next = recurrentes.map((r) => (r.id === id ? { ...r, amount: Number(amount) || 0 } : r));
+    setRecurrentes(next);
+    if (!HAS_SUPABASE) { mockSaveRecurrentes(next); return; }
+    await sb(`recurring_entries?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ amount: Number(amount) || 0 }) });
+  }
+
+  async function deleteRecurrente(id) {
+    const next = recurrentes.filter((r) => r.id !== id);
+    setRecurrentes(next);
+    if (!HAS_SUPABASE) { mockSaveRecurrentes(next); return; }
+    await sb(`recurring_entries?id=eq.${id}`, { method: "DELETE" });
   }
 
   function exportarExcel() {
@@ -1454,6 +1545,16 @@ export default function FinanzasApp() {
           )}
           {tab === "categorias" && (
             <CategoriasTab categories={categories} contarUsos={contarUsos} onAdd={addCategory} onRename={renameCategory} onDelete={deleteCategory} />
+          )}
+          {tab === "recurrentes" && (
+            <RecurrentesTab
+              recurrentes={recurrentes}
+              categories={categories}
+              onAdd={addRecurrente}
+              onToggleActivo={toggleActivoRecurrente}
+              onEditMonto={editMontoRecurrente}
+              onDelete={deleteRecurrente}
+            />
           )}
           {tab === "recategorizar" && (
             <RecategorizarTab
@@ -2730,6 +2831,145 @@ function CategoriasTab({ categories, contarUsos, onAdd, onRename, onDelete }) {
                 </div>
               )}
               {deleteError[cat] && <div style={{ color: BRICK, fontSize: 11.5, marginTop: 6 }}>{deleteError[cat]}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RecurrentesTab({ recurrentes, categories, onAdd, onToggleActivo, onEditMonto, onDelete }) {
+  const [tipo, setTipo] = useState("gasto");
+  const [categoria, setCategoria] = useState(categories[0] || "Otros");
+  const [monto, setMonto] = useState("");
+  const [desc, setDesc] = useState("");
+  const [cuenta, setCuenta] = useState("");
+  const [diaMes, setDiaMes] = useState("1");
+  const [agregando, setAgregando] = useState(false);
+
+  const [editandoId, setEditandoId] = useState(null);
+  const [editValue, setEditValue] = useState("");
+
+  const cats = tipo === "gasto" ? categories : INGRESO_CATS;
+
+  useEffect(() => { setCategoria(cats[0] || ""); }, [tipo]); // eslint-disable-line
+
+  async function handleAdd() {
+    if (!monto || Number(monto) <= 0) return;
+    setAgregando(true);
+    await onAdd({ type: tipo, category: categoria, amount: monto, desc, account: cuenta, diaMes });
+    setAgregando(false);
+    setMonto("");
+    setDesc("");
+  }
+
+  function empezarEdicion(r) {
+    setEditandoId(r.id);
+    setEditValue(String(r.amount));
+  }
+  async function confirmarEdicion(id) {
+    await onEditMonto(id, editValue);
+    setEditandoId(null);
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ fontSize: 13, color: "#8a9698", marginBottom: -4 }}>
+        Cargá acá lo que se repite todos los meses (alquiler, seguros, suscripciones, sueldo). La app crea el movimiento solo, el día del mes que elijas — se genera la primera vez que alguien abre la app en esa fecha o después.
+      </div>
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Nuevo recurrente</div>
+
+        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+          {[["gasto", "Gasto", BRICK], ["ingreso", "Ingreso", GREEN]].map(([k, l, c]) => (
+            <button key={k} onClick={() => setTipo(k)} style={{
+              flex: 1, padding: "8px 6px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+              border: `1.5px solid ${tipo === k ? c : "#ddd6c4"}`,
+              background: tipo === k ? c : "#fff", color: tipo === k ? "#fff" : INK,
+            }}>{l}</button>
+          ))}
+        </div>
+
+        <label style={labelStyle}>Monto (ARS)</label>
+        <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 14, fontSize: 18, fontFamily: "'IBM Plex Mono', monospace" }} />
+
+        <label style={labelStyle}>Categoría</label>
+        <select value={categoria} onChange={(e) => setCategoria(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }}>
+          {cats.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+
+        <label style={labelStyle}>Descripción (opcional)</label>
+        <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Ej: Alquiler casita Hebraica" style={{ ...inputStyle, marginBottom: 14 }} />
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+          <div style={{ flex: 1 }}>
+            <label style={labelStyle}>Cuenta (opcional)</label>
+            <input value={cuenta} onChange={(e) => setCuenta(e.target.value)} placeholder="Ej: ARQ" style={inputStyle} />
+          </div>
+          <div style={{ width: 100 }}>
+            <label style={labelStyle}>Día del mes</label>
+            <input type="number" min={1} max={28} value={diaMes} onChange={(e) => setDiaMes(e.target.value)} style={inputStyle} />
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: "#8a9698", marginTop: -8, marginBottom: 14 }}>
+          Máximo día 28, para que funcione igual todos los meses (incluyendo febrero).
+        </div>
+
+        <button onClick={handleAdd} disabled={agregando || !monto} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
+          {agregando ? "Agregando..." : "Agregar recurrente"}
+        </button>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {recurrentes.length === 0 ? (
+          <EmptyState text="Todavía no cargaste ningún gasto o ingreso recurrente." />
+        ) : recurrentes.map((r) => {
+          const enEdicion = editandoId === r.id;
+          return (
+            <div key={r.id} style={{ background: "#fff", borderRadius: 8, padding: "12px 14px", boxShadow: "0 1px 4px rgba(27,42,46,0.06)", opacity: r.activo ? 1 : 0.55 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, padding: "1px 7px", borderRadius: 10,
+                      background: r.type === "gasto" ? "#fbe9e6" : "#e8f3ec",
+                      color: r.type === "gasto" ? BRICK : GREEN,
+                    }}>{r.type === "gasto" ? "Gasto" : "Ingreso"}</span>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{r.category}</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "#8a9698", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {r.descripcion || "(sin descripción)"} · día {r.dia_mes}{r.account ? ` · ${r.account}` : ""}
+                  </div>
+                </div>
+                {enEdicion ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <input
+                      type="number"
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      autoFocus
+                      style={{ width: 90, padding: "4px 6px", borderRadius: 6, border: "1px solid #ddd6c4", fontSize: 13, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}
+                      onKeyDown={(e) => { if (e.key === "Enter") confirmarEdicion(r.id); if (e.key === "Escape") setEditandoId(null); }}
+                    />
+                    <button onClick={() => confirmarEdicion(r.id)} style={{ background: "none", border: "none", cursor: "pointer", color: GREEN }}><Check size={16} /></button>
+                  </div>
+                ) : (
+                  <button onClick={() => empezarEdicion(r)} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 14, color: r.type === "gasto" ? BRICK : GREEN, display: "flex", alignItems: "center", gap: 4 }}>
+                    {fmtARS(r.amount)} <Pencil size={12} color="#8a9698" />
+                  </button>
+                )}
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, paddingTop: 10, borderTop: "1px dashed #eee6d5" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: "#8a9698" }}>
+                  <input type="checkbox" checked={r.activo} onChange={(e) => onToggleActivo(r.id, e.target.checked)} />
+                  Activo
+                </label>
+                <button onClick={() => onDelete(r.id)} aria-label="Eliminar recurrente" style={{ background: "none", border: "none", cursor: "pointer", color: BRICK }}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
             </div>
           );
         })}
