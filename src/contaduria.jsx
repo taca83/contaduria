@@ -51,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v68 · 2026-08-03 · carga por foto de recibo: la IA lee monto, fecha, categoría y detalle (nuevo botón cámara)
-const APP_VERSION = "v68 · 2026-08-03";
+// v69 · 2026-08-03 · botón central único (flotando sobre la barra, estilo QR de Mercado Pago) que despliega cámara/voz/manual
+const APP_VERSION = "v69 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -675,6 +675,7 @@ export default function FinanzasApp() {
   const [showVoice, setShowVoice] = useState(false);
   const [voicePrefill, setVoicePrefill] = useState(null);
   const [showFoto, setShowFoto] = useState(false);
+  const [showAddMenu, setShowAddMenu] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // --- Layout responsive: por ahora un único breakpoint (≥900px = desktop) ---
@@ -1835,39 +1836,54 @@ export default function FinanzasApp() {
         })}
       </div>
 
-      {/* FAB */}
+      {/* Menú de opciones del botón central, con fondo para cerrar tocando afuera */}
+      {showAddMenu && (
+        <div onClick={() => setShowAddMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 13 }} />
+      )}
+      {showAddMenu && (
+        <div style={{
+          position: "fixed", bottom: 156, left: "50%", transform: "translateX(-50%)",
+          zIndex: 14, display: "flex", flexDirection: "column", gap: 10, alignItems: "center",
+        }}>
+          {[
+            ["manual", "Ingreso manual", Pencil, () => setShowForm(true)],
+            ["voz", "Por voz", Mic, () => setShowVoice(true)],
+            ["foto", "Foto de recibo", Camera, () => setShowFoto(true)],
+          ].map(([key, label, Icon, accion]) => (
+            <button
+              key={key}
+              onClick={() => { setShowAddMenu(false); accion(); }}
+              style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "10px 18px 10px 14px",
+                background: "#fff", border: "none", borderRadius: 30, cursor: "pointer",
+                boxShadow: "0 4px 14px rgba(27,42,46,0.2)", whiteSpace: "nowrap",
+              }}
+            >
+              <span style={{
+                width: 34, height: 34, borderRadius: "50%", background: PAPER_DIM, color: TEAL,
+                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+              }}>
+                <Icon size={17} />
+              </span>
+              <span style={{ fontSize: 13.5, fontWeight: 600, color: INK }}>{label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Botón central flotante, sobre la barra de navegación */}
       <button
-        onClick={() => setShowFoto(true)}
+        onClick={() => setShowAddMenu((v) => !v)}
         style={{
-          position: "fixed", bottom: 78, right: 154, width: 48, height: 48, borderRadius: "50%",
-          background: "#fff", color: TEAL, border: `1.5px solid ${TEAL}`, boxShadow: "0 4px 14px rgba(27,42,46,0.15)",
-          display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10
+          position: "fixed", bottom: 46, left: "50%", transform: `translateX(-50%) rotate(${showAddMenu ? 45 : 0}deg)`,
+          width: 62, height: 62, borderRadius: "50%",
+          background: TEAL, color: "#fff", border: "4px solid #fff", boxShadow: "0 8px 20px rgba(15,110,110,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 15,
+          transition: "transform 0.2s ease",
         }}
-        aria-label="Cargar movimiento con una foto de recibo"
+        aria-label={showAddMenu ? "Cerrar opciones de carga" : "Agregar movimiento"}
       >
-        <Camera size={20} />
-      </button>
-      <button
-        onClick={() => setShowVoice(true)}
-        style={{
-          position: "fixed", bottom: 78, right: 88, width: 48, height: 48, borderRadius: "50%",
-          background: "#fff", color: TEAL, border: `1.5px solid ${TEAL}`, boxShadow: "0 4px 14px rgba(27,42,46,0.15)",
-          display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10
-        }}
-        aria-label="Cargar movimiento por voz"
-      >
-        <Mic size={20} />
-      </button>
-      <button
-        onClick={() => setShowForm(true)}
-        style={{
-          position: "fixed", bottom: 78, right: 22, width: 56, height: 56, borderRadius: "50%",
-          background: TEAL, color: "#fff", border: "none", boxShadow: "0 8px 20px rgba(15,110,110,0.4)",
-          display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10
-        }}
-        aria-label="Agregar movimiento"
-      >
-        <Plus size={26} />
+        <Plus size={28} />
       </button>
 
       {showFoto && (
