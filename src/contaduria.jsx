@@ -7,7 +7,7 @@ import {
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
   ArrowUpRight, ArrowDownRight, Landmark, Settings, Trash2, User, Download, Menu,
-  Home, List, Upload, Pencil, Check, Mic, Square
+  Home, List, Upload, Pencil, Check, Mic, Square, Zap
 } from "lucide-react";
 
 const DEFAULT_GASTO_CATS = ["Comida", "Tarjetas", "Ropa", "Salud", "Educación", "Transporte", "Ocio", "Servicios", "Vivienda", "Otros"];
@@ -16,6 +16,7 @@ const TAB_LABELS = {
   movimientos: "Movimientos",
   ahorros: "Ahorros e inversiones",
   presupuestos: "Presupuestos",
+  rapidos: "Gastos rápidos",
   importar: "Importar",
   duplicados: "Duplicados",
   recategorizar: "Recategorizar",
@@ -29,10 +30,10 @@ const TAB_LABELS = {
 const PRIMARY_TABS = [
   ["resumen", "Resumen", Home],
   ["movimientos", "Movimientos", List],
-  ["presupuestos", "Presupuestos", Target],
+  ["rapidos", "Gastos rápidos", Zap],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
+const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "presupuestos", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -48,8 +49,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v54 · 2026-08-02 · gastos/ingresos recurrentes con auto-carga mensual (pestaña nueva "Gastos recurrentes")
-const APP_VERSION = "v54 · 2026-08-02";
+// v55 · 2026-08-02 · rename a "Finanzas del hogar" + Gastos rápidos (reemplaza Presupuestos en el menú grande, Presupuestos pasa al menú chico)
+const APP_VERSION = "v55 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -494,7 +495,7 @@ async function registrarBiometria(nombre) {
   const cred = await navigator.credentials.create({
     publicKey: {
       challenge: generarDesafioWebAuthn(),
-      rp: { name: "Contaduría" },
+      rp: { name: "Finanzas del hogar" },
       user: { id: generarDesafioWebAuthn(), name: nombre || "usuario", displayName: nombre || "Usuario" },
       pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
       authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required" },
@@ -580,6 +581,7 @@ function mockLoad() {
     overrides: safeGet("mock_overrides") || {},
     categories: safeGet("mock_categories") || DEFAULT_GASTO_CATS,
     recurrentes: safeGet("mock_recurrentes") || [],
+    accesosRapidos: safeGet("mock_accesos_rapidos") || [],
   };
 }
 function mockSaveEntries(entries) { safeSet("mock_entries", entries); }
@@ -588,6 +590,7 @@ function mockSaveBudgets(budgets) { safeSet("mock_budgets", budgets); }
 function mockSaveNames(names) { safeSet("mock_names", names); }
 function mockSaveOverrides(overrides) { safeSet("mock_overrides", overrides); }
 function mockSaveRecurrentes(recurrentes) { safeSet("mock_recurrentes", recurrentes); }
+function mockSaveAccesosRapidos(accesos) { safeSet("mock_accesos_rapidos", accesos); }
 
 export default function FinanzasApp() {
   const [loading, setLoading] = useState(true);
@@ -599,6 +602,8 @@ export default function FinanzasApp() {
   const [categoryOverrides, setCategoryOverrides] = useState({});
   const [categories, setCategories] = useState(DEFAULT_GASTO_CATS);
   const [recurrentes, setRecurrentes] = useState([]);
+  const [accesosRapidos, setAccesosRapidos] = useState([]);
+  const [ultimoAccesoRegistrado, setUltimoAccesoRegistrado] = useState(null);
   const [tab, setTab] = useState("resumen");
   const [menuOpen, setMenuOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -687,12 +692,13 @@ export default function FinanzasApp() {
     const hh = miembro[0];
     setHouseholdId(hh.household_id);
     setProfileName(hh.display_name);
-    const [entRows, budRows, ovrRows, catRows, recRows] = await Promise.all([
+    const [entRows, budRows, ovrRows, catRows, recRows, rapRows] = await Promise.all([
       sb(`entries?household_id=eq.${hh.household_id}&select=*&order=date.desc`),
       sb(`budgets?household_id=eq.${hh.household_id}&select=*`),
       sb(`category_overrides?household_id=eq.${hh.household_id}&select=*`),
       sb(`categories?household_id=eq.${hh.household_id}&select=name&order=name.asc`),
       sb(`recurring_entries?household_id=eq.${hh.household_id}&select=*`),
+      sb(`quick_entries?household_id=eq.${hh.household_id}&select=*&order=sort_order.asc`),
     ]);
     const entriesCargadas = (entRows || []).map(entryFromDb);
     setEntries(entriesCargadas);
@@ -705,6 +711,7 @@ export default function FinanzasApp() {
     setCategories((catRows || []).map((c) => c.name).length > 0 ? catRows.map((c) => c.name) : DEFAULT_GASTO_CATS);
     const recurrentesCargadas = recRows || [];
     setRecurrentes(recurrentesCargadas);
+    setAccesosRapidos(rapRows || []);
     setTab("resumen");
     setLoading(false);
     generarRecurrentesDelMes(recurrentesCargadas, entriesCargadas, hh.household_id, hh.display_name)
@@ -753,6 +760,7 @@ export default function FinanzasApp() {
         setCategoryOverrides(mock.overrides);
         setCategories(mock.categories);
         setRecurrentes(mock.recurrentes);
+        setAccesosRapidos(mock.accesosRapidos);
         setLoading(false);
         generarRecurrentesDelMes(mock.recurrentes, mock.entries, null, prof?.name)
           .catch((e) => console.error("No se pudieron generar los recurrentes del mes", e));
@@ -876,6 +884,7 @@ export default function FinanzasApp() {
     setBudgets({});
     setCategoryOverrides({});
     setRecurrentes([]);
+    setAccesosRapidos([]);
     setAuthMode("login");
   }
 
@@ -886,8 +895,9 @@ export default function FinanzasApp() {
       if (!HAS_SUPABASE) mockSaveEntries(next);
       return next;
     });
-    if (!HAS_SUPABASE) return;
+    if (!HAS_SUPABASE) return full;
     await sb("entries", { method: "POST", body: JSON.stringify([{ ...entryToDb(full), household_id: householdId }]) });
+    return full;
   }
 
   async function logAudit(accion, entrySnapshot, valorAnterior, valorNuevo) {
@@ -1014,11 +1024,13 @@ export default function FinanzasApp() {
     setBudgets({});
     setCategoryOverrides({});
     setRecurrentes([]);
+    setAccesosRapidos([]);
     if (!HAS_SUPABASE) {
       mockSaveEntries([]);
       mockSaveBudgets({});
       mockSaveOverrides({});
       mockSaveRecurrentes([]);
+      mockSaveAccesosRapidos([]);
       safeSet("mock_audit_log", []);
       return;
     }
@@ -1027,6 +1039,7 @@ export default function FinanzasApp() {
       sb("budgets?category=not.is.null", { method: "DELETE" }),
       sb("category_overrides?desc_key=not.is.null", { method: "DELETE" }),
       sb("recurring_entries?id=not.is.null", { method: "DELETE" }),
+      sb("quick_entries?id=not.is.null", { method: "DELETE" }),
       sb("audit_log?id=not.is.null", { method: "DELETE" }),
     ]);
   }
@@ -1079,6 +1092,61 @@ export default function FinanzasApp() {
     await sb(`recurring_entries?id=eq.${id}`, { method: "DELETE" });
   }
 
+  async function addAccesoRapido(datos) {
+    const nuevo = {
+      id: uid(),
+      type: "gasto",
+      category: datos.category,
+      amount: Number(datos.amount) || 0,
+      descripcion: datos.desc || "",
+      account: datos.account || "",
+      moneda: "ARS",
+      sort_order: accesosRapidos.length,
+    };
+    const next = [...accesosRapidos, nuevo];
+    setAccesosRapidos(next);
+    if (!HAS_SUPABASE) { mockSaveAccesosRapidos(next); return; }
+    await sb("quick_entries", { method: "POST", body: JSON.stringify([{ ...nuevo, household_id: householdId }]) });
+  }
+
+  async function editAccesoRapido(id, cambios) {
+    const next = accesosRapidos.map((a) => (a.id === id ? { ...a, ...cambios } : a));
+    setAccesosRapidos(next);
+    if (!HAS_SUPABASE) { mockSaveAccesosRapidos(next); return; }
+    await sb(`quick_entries?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(cambios) });
+  }
+
+  async function deleteAccesoRapido(id) {
+    const next = accesosRapidos.filter((a) => a.id !== id);
+    setAccesosRapidos(next);
+    if (!HAS_SUPABASE) { mockSaveAccesosRapidos(next); return; }
+    await sb(`quick_entries?id=eq.${id}`, { method: "DELETE" });
+  }
+
+  // Un toque en un acceso rápido carga el gasto ya, con la fecha de hoy —
+  // muestra un toast con "Deshacer" por unos segundos por si fue sin querer.
+  async function registrarAccesoRapido(acceso) {
+    const entry = await addEntry({
+      type: acceso.type || "gasto",
+      category: acceso.category,
+      amount: Number(acceso.amount),
+      desc: acceso.descripcion || acceso.category,
+      date: todayISO(),
+      account: acceso.account || "",
+      moneda: acceso.moneda || "ARS",
+    });
+    setUltimoAccesoRegistrado({ id: entry.id, nombre: acceso.descripcion || acceso.category });
+    setTimeout(() => {
+      setUltimoAccesoRegistrado((cur) => (cur?.id === entry.id ? null : cur));
+    }, 6000);
+  }
+
+  function deshacerUltimoAcceso() {
+    if (!ultimoAccesoRegistrado) return;
+    deleteEntry(ultimoAccesoRegistrado.id);
+    setUltimoAccesoRegistrado(null);
+  }
+
   function exportarExcel() {
     const filas = [...entries]
       .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
@@ -1099,7 +1167,7 @@ export default function FinanzasApp() {
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
-    XLSX.writeFile(wb, `contaduria_movimientos_${todayISO()}.xlsx`);
+    XLSX.writeFile(wb, `finanzas_del_hogar_movimientos_${todayISO()}.xlsx`);
   }
 
   const now = new Date();
@@ -1196,7 +1264,7 @@ export default function FinanzasApp() {
         <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
           <style>{fontImports}</style>
           <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 380, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
-            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Finanzas del hogar</div>
             <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 24 }}>Vista previa local. Decinos quién sos para empezar.</div>
             <div style={{ display: "flex", gap: 8 }}>
               <input
@@ -1249,7 +1317,7 @@ export default function FinanzasApp() {
       <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
         <style>{fontImports}</style>
         <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 400, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
-          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 28, fontWeight: 600, color: INK, marginBottom: 6 }}>Finanzas del hogar</div>
           <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 20 }}>
             {authMode === "signup" ? "Creá tu cuenta para empezar." : "Iniciá sesión para continuar."}
           </div>
@@ -1299,7 +1367,7 @@ export default function FinanzasApp() {
       <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
         <style>{fontImports}</style>
         <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 380, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)", textAlign: "center" }}>
-          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: INK, marginBottom: 6 }}>Contaduría</div>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: INK, marginBottom: 6 }}>Finanzas del hogar</div>
           <div style={{ color: "#5a6b6d", fontSize: 14, marginBottom: 24 }}>Hola, {profileName}. Desbloqueá para ver tus datos.</div>
           {bioError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 14 }}>{bioError}</div>}
           <button onClick={intentarDesbloquear} disabled={bioBusy} style={{ ...btnPrimary, width: "100%", justifyContent: "center", padding: "13px" }}>
@@ -1329,7 +1397,7 @@ export default function FinanzasApp() {
       <div style={{ background: INK, color: PAPER, padding: "20px 20px 26px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", maxWidth: isDesktop ? 1080 : 720, margin: "0 auto" }}>
           <div>
-            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600 }}>Contaduría</div>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600 }}>Finanzas del hogar</div>
             <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2 }}>
               Hola, {profileName}
             </div>
@@ -1556,6 +1624,16 @@ export default function FinanzasApp() {
               onDelete={deleteRecurrente}
             />
           )}
+          {tab === "rapidos" && (
+            <AccesosRapidosTab
+              accesosRapidos={accesosRapidos}
+              categories={categories}
+              onRegistrar={registrarAccesoRapido}
+              onAdd={addAccesoRapido}
+              onEdit={editAccesoRapido}
+              onDelete={deleteAccesoRapido}
+            />
+          )}
           {tab === "recategorizar" && (
             <RecategorizarTab
               categories={categories}
@@ -1602,6 +1680,20 @@ export default function FinanzasApp() {
           )}
         </div>
       </div>
+
+      {ultimoAccesoRegistrado && (
+        <div style={{
+          position: "fixed", bottom: 90, left: "50%", transform: "translateX(-50%)",
+          background: INK, color: PAPER, borderRadius: 10, padding: "10px 16px",
+          display: "flex", alignItems: "center", gap: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
+          zIndex: 15, fontSize: 13, whiteSpace: "nowrap",
+        }}>
+          <span>Agregado: {ultimoAccesoRegistrado.nombre}</span>
+          <button onClick={deshacerUltimoAcceso} style={{ background: "none", border: "none", color: GOLD, fontWeight: 700, cursor: "pointer", fontSize: 13 }}>
+            Deshacer
+          </button>
+        </div>
+      )}
 
       {/* FAB */}
       <button
@@ -2677,7 +2769,7 @@ function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, 
             {inviteLink && (
               <div style={{ textAlign: "center", marginBottom: 16, paddingTop: 4 }}>
                 <a
-                  href={`https://wa.me/?text=${encodeURIComponent(`Te invito a sumarte a nuestro hogar en Contaduría 🏠\nEntrá acá: ${inviteLink}`)}`}
+                  href={`https://wa.me/?text=${encodeURIComponent(`Te invito a sumarte a nuestro hogar en Finanzas del hogar 🏠\nEntrá acá: ${inviteLink}`)}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "11px 18px", background: "#25D366", color: "#fff", borderRadius: 8, textDecoration: "none", fontWeight: 700, fontSize: 13.5, marginBottom: 16 }}
@@ -2832,6 +2924,121 @@ function CategoriasTab({ categories, contarUsos, onAdd, onRename, onDelete }) {
               )}
               {deleteError[cat] && <div style={{ color: BRICK, fontSize: 11.5, marginTop: 6 }}>{deleteError[cat]}</div>}
             </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onEdit, onDelete }) {
+  const [editando, setEditando] = useState(false);
+  const [nombre, setNombre] = useState("");
+  const [categoria, setCategoria] = useState(categories[0] || "Otros");
+  const [monto, setMonto] = useState("");
+  const [cuenta, setCuenta] = useState("");
+  const [agregando, setAgregando] = useState(false);
+
+  const [editandoId, setEditandoId] = useState(null);
+  const [editNombre, setEditNombre] = useState("");
+  const [editMonto, setEditMonto] = useState("");
+
+  async function handleAdd() {
+    if (!nombre.trim() || !monto || Number(monto) <= 0) return;
+    setAgregando(true);
+    await onAdd({ desc: nombre.trim(), category: categoria, amount: monto, account: cuenta });
+    setAgregando(false);
+    setNombre("");
+    setMonto("");
+    setCuenta("");
+  }
+
+  function empezarEdicion(a) {
+    setEditandoId(a.id);
+    setEditNombre(a.descripcion || "");
+    setEditMonto(String(a.amount));
+  }
+  async function confirmarEdicion(id) {
+    await onEdit(id, { descripcion: editNombre, amount: Number(editMonto) || 0 });
+    setEditandoId(null);
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+        <div style={{ fontSize: 13, color: "#8a9698" }}>
+          Un toque y listo: gastos que se repiten con el mismo monto y categoría (psicóloga, nafta, cochera...).
+        </div>
+        <button onClick={() => setEditando((v) => !v)} style={{ ...btnOutline, padding: "6px 10px", fontSize: 12, flexShrink: 0 }}>
+          {editando ? "Listo" : "Editar"}
+        </button>
+      </div>
+
+      {editando && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Nuevo acceso rápido</div>
+          <label style={labelStyle}>Nombre</label>
+          <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej: Psicóloga" style={{ ...inputStyle, marginBottom: 14 }} />
+          <label style={labelStyle}>Categoría</label>
+          <select value={categoria} onChange={(e) => setCategoria(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }}>
+            {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <label style={labelStyle}>Monto (ARS)</label>
+          <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 14, fontSize: 18, fontFamily: "'IBM Plex Mono', monospace" }} />
+          <label style={labelStyle}>Cuenta (opcional)</label>
+          <input value={cuenta} onChange={(e) => setCuenta(e.target.value)} placeholder="Ej: Efectivo" style={{ ...inputStyle, marginBottom: 14 }} />
+          <button onClick={handleAdd} disabled={agregando} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
+            {agregando ? "Agregando..." : "Agregar acceso rápido"}
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        {accesosRapidos.length === 0 ? (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <EmptyState text="Todavía no tenés accesos rápidos. Tocá Editar para crear el primero." />
+          </div>
+        ) : accesosRapidos.map((a) => {
+          const enEdicion = editandoId === a.id;
+          if (editando) {
+            return (
+              <div key={a.id} style={{ background: "#fff", borderRadius: 10, padding: 12, boxShadow: "0 1px 4px rgba(27,42,46,0.06)" }}>
+                {enEdicion ? (
+                  <>
+                    <input value={editNombre} onChange={(e) => setEditNombre(e.target.value)} style={{ ...inputStyle, marginBottom: 6, padding: "6px 8px", fontSize: 13 }} />
+                    <input type="number" value={editMonto} onChange={(e) => setEditMonto(e.target.value)} style={{ ...inputStyle, marginBottom: 8, padding: "6px 8px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }} />
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => confirmarEdicion(a.id)} style={{ ...btnPrimary, flex: 1, justifyContent: "center", padding: "6px", fontSize: 12 }}>Guardar</button>
+                      <button onClick={() => setEditandoId(null)} style={{ ...btnOutline, flex: 1, justifyContent: "center", padding: "6px", fontSize: 12 }}>Cancelar</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.descripcion || a.category}</div>
+                    <div style={{ fontSize: 11.5, color: "#8a9698", marginBottom: 8 }}>{a.category}</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{fmtARS(a.amount)}</div>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button onClick={() => empezarEdicion(a)} style={{ background: "none", border: "none", cursor: "pointer", color: TEAL }}><Pencil size={15} /></button>
+                      <button onClick={() => onDelete(a.id)} style={{ background: "none", border: "none", cursor: "pointer", color: BRICK }}><Trash2 size={15} /></button>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          }
+          return (
+            <button
+              key={a.id}
+              onClick={() => onRegistrar(a)}
+              style={{
+                background: "#fff", border: "1.5px solid #ddd6c4", borderRadius: 10, padding: "16px 12px",
+                cursor: "pointer", textAlign: "left", boxShadow: "0 1px 4px rgba(27,42,46,0.06)",
+              }}
+            >
+              <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.descripcion || a.category}</div>
+              <div style={{ fontSize: 11, color: "#8a9698", marginBottom: 8 }}>{a.category}</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 16, color: BRICK }}>{fmtARS(a.amount)}</div>
+            </button>
           );
         })}
       </div>
