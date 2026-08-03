@@ -47,8 +47,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v47 · 2026-08-02 · layout responsive: contenido más ancho y gráficos/presupuestos en grilla en desktop
-const APP_VERSION = "v47 · 2026-08-02";
+// v48 · 2026-08-02 · resumen mensual en tarjetas en el celu (sin cortes feos), 3M y comparar meses sueltos en Evolución
+const APP_VERSION = "v48 · 2026-08-02";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1403,8 +1403,27 @@ function DivisasTab({ cambiosStats, cambios, onDelete }) {
 function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd, isDesktop }) {
   const [expandedCat, setExpandedCat] = useState(null);
   const [rango, setRango] = useState(6);
+  const [compareMode, setCompareMode] = useState(false);
+  const [comparedMonths, setComparedMonths] = useState([]);
+
+  function calcularMes(key) {
+    const [y, m] = key.split("-").map(Number);
+    const d = new Date(y, m - 1, 1);
+    const label = d.toLocaleDateString("es-AR", { month: "short", year: "2-digit" });
+    const ing = entries.filter((e) => (e.type === "ingreso" || e.type === "cambio") && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
+    const gas = entries.filter((e) => e.type === "gasto" && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
+    return { mes: label, Ingresos: ing, Gastos: gas };
+  }
+
+  const availableMonths = useMemo(() => {
+    const set = new Set(entries.map((e) => monthKey(e.date)).filter(Boolean));
+    return [...set].sort().reverse();
+  }, [entries]);
 
   const chartData = useMemo(() => {
+    if (compareMode) {
+      return [...comparedMonths].sort().map(calcularMes);
+    }
     const now = new Date();
     let mesesAMostrar = rango;
     if (rango === "todo") {
@@ -1424,7 +1443,11 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
       months.push({ mes: label, Ingresos: ing, Gastos: gas });
     }
     return months;
-  }, [entries, rango]);
+  }, [entries, rango, compareMode, comparedMonths]);
+
+  function toggleMesComparado(key) {
+    setComparedMonths((prev) => prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]);
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -1495,35 +1518,80 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>Evolución</div>
-          <div style={{ display: "flex", gap: 4 }}>
-            {[[6, "6M"], [12, "12M"], [24, "24M"], ["todo", "Todo"]].map(([v, l]) => (
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {!compareMode && [[3, "3M"], [6, "6M"], [12, "12M"], [24, "24M"], ["todo", "Todo"]].map(([v, l]) => (
               <button key={l} onClick={() => setRango(v)} style={{
                 padding: "5px 10px", borderRadius: 16, fontSize: 11.5, fontWeight: 700, cursor: "pointer",
                 border: `1px solid ${rango === v ? TEAL : "#ddd6c4"}`,
                 background: rango === v ? TEAL : "#fff", color: rango === v ? "#fff" : INK
               }}>{l}</button>
             ))}
+            <button
+              onClick={() => setCompareMode((v) => !v)}
+              style={{
+                padding: "5px 10px", borderRadius: 16, fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                border: `1px solid ${compareMode ? GOLD : "#ddd6c4"}`,
+                background: compareMode ? GOLD : "#fff", color: compareMode ? "#fff" : INK,
+              }}
+            >
+              {compareMode ? "✕ Comparar meses" : "Comparar meses"}
+            </button>
           </div>
         </div>
-        <div style={{ width: "100%", height: 220 }}>
-          <ResponsiveContainer>
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#eee6d5" vertical={false} />
-              <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} interval={chartData.length > 12 ? 1 : 0} />
-              <YAxis tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} width={40} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
-              <Tooltip formatter={(v) => fmtARS(v)} />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="Ingresos" fill={GREEN} radius={[3, 3, 0, 0]} />
-              <Bar dataKey="Gastos" fill={BRICK} radius={[3, 3, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+
+        {compareMode && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 6 }}>Elegí los meses que querés comparar (no hace falta que sean seguidos):</div>
+            {availableMonths.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: "#8a9698" }}>Todavía no hay movimientos cargados.</div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {availableMonths.map((key) => {
+                  const [y, m] = key.split("-").map(Number);
+                  const label = new Date(y, m - 1, 1).toLocaleDateString("es-AR", { month: "short", year: "2-digit" });
+                  const active = comparedMonths.includes(key);
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => toggleMesComparado(key)}
+                      style={{
+                        padding: "5px 10px", borderRadius: 16, fontSize: 11.5, fontWeight: 700, cursor: "pointer", textTransform: "capitalize",
+                        border: `1px solid ${active ? TEAL : "#ddd6c4"}`,
+                        background: active ? TEAL : "#fff", color: active ? "#fff" : INK,
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {compareMode && comparedMonths.length === 0 ? (
+          <EmptyState text="Elegí al menos un mes para comparar." />
+        ) : (
+          <div style={{ width: "100%", height: 220 }}>
+            <ResponsiveContainer>
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#eee6d5" vertical={false} />
+                <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} interval={chartData.length > 12 ? 1 : 0} />
+                <YAxis tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} width={40} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
+                <Tooltip formatter={(v) => fmtARS(v)} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="Ingresos" fill={GREEN} radius={[3, 3, 0, 0]} />
+                <Bar dataKey="Gastos" fill={BRICK} radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </div>
       </div>
 
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Resumen mensual</div>
-        {chartData.length === 0 ? <EmptyState text="Sin datos para este rango." /> : (
+        {chartData.length === 0 ? <EmptyState text={compareMode ? "Elegí al menos un mes para comparar." : "Sin datos para este rango."} /> : isDesktop ? (
           <div style={{ display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", paddingBottom: 8, borderBottom: "1px solid #eee6d5" }}>
               <div style={{ flex: 1.2 }}>Mes</div>
@@ -1536,9 +1604,35 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
               return (
                 <div key={i} style={{ display: "flex", padding: "8px 0", borderBottom: "1px solid #f2eee2", fontSize: 12.5, alignItems: "center" }}>
                   <div style={{ flex: 1.2, fontWeight: 600 }}>{m.mes}</div>
-                  <div style={{ flex: 1, textAlign: "right", color: GREEN, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(m.Ingresos)}</div>
-                  <div style={{ flex: 1, textAlign: "right", color: BRICK, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(m.Gastos)}</div>
-                  <div style={{ flex: 1, textAlign: "right", fontWeight: 700, color: bal >= 0 ? GREEN : BRICK, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(bal)}</div>
+                  <div style={{ flex: 1, textAlign: "right", color: GREEN, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Ingresos)}</div>
+                  <div style={{ flex: 1, textAlign: "right", color: BRICK, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Gastos)}</div>
+                  <div style={{ flex: 1, textAlign: "right", fontWeight: 700, color: bal >= 0 ? GREEN : BRICK, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(bal)}</div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          // En el celu, 4 columnas en una fila no entran cómodo con montos
+          // grandes (se cortaban feo) — acá cada mes es su propia tarjeta
+          // con Ingresos/Gastos/Balance apilados.
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[...chartData].reverse().map((m, i) => {
+              const bal = m.Ingresos - m.Gastos;
+              return (
+                <div key={i} style={{ border: "1px solid #f2eee2", borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, textTransform: "capitalize" }}>{m.mes}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
+                    <span style={{ color: "#8a9698" }}>Ingresos</span>
+                    <span style={{ color: GREEN, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Ingresos)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
+                    <span style={{ color: "#8a9698" }}>Gastos</span>
+                    <span style={{ color: BRICK, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Gastos)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, paddingTop: 5, marginTop: 3, borderTop: "1px dashed #eee6d5" }}>
+                    <span style={{ fontWeight: 700 }}>Balance</span>
+                    <span style={{ fontWeight: 700, color: bal >= 0 ? GREEN : BRICK, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(bal)}</span>
+                  </div>
                 </div>
               );
             })}
