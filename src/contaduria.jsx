@@ -50,8 +50,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v60 · 2026-08-02 · vincular WhatsApp (Mi hogar) para cargar datos y preguntarle al bot vía el webhook de Meta Cloud API
-const APP_VERSION = "v60 · 2026-08-02";
+// v62 · 2026-08-03 · botón separado para borrar solo las reglas de categorización aprendidas (menú ☰ → Reiniciar datos)
+const APP_VERSION = "v62 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1090,16 +1090,20 @@ export default function FinanzasApp() {
     return { ok: true };
   }
 
+  async function resetearReglasAprendidas() {
+    setCategoryOverrides({});
+    if (!HAS_SUPABASE) { mockSaveOverrides({}); return; }
+    await sb("category_overrides?desc_key=not.is.null", { method: "DELETE" });
+  }
+
   async function resetearTodo() {
     setEntries([]);
     setBudgets({});
-    setCategoryOverrides({});
     setRecurrentes([]);
     setAccesosRapidos([]);
     if (!HAS_SUPABASE) {
       mockSaveEntries([]);
       mockSaveBudgets({});
-      mockSaveOverrides({});
       mockSaveRecurrentes([]);
       mockSaveAccesosRapidos([]);
       safeSet("mock_audit_log", []);
@@ -1108,7 +1112,6 @@ export default function FinanzasApp() {
     await Promise.all([
       sb("entries?id=not.is.null", { method: "DELETE" }),
       sb("budgets?category=not.is.null", { method: "DELETE" }),
-      sb("category_overrides?desc_key=not.is.null", { method: "DELETE" }),
       sb("recurring_entries?id=not.is.null", { method: "DELETE" }),
       sb("quick_entries?id=not.is.null", { method: "DELETE" }),
       sb("audit_log?id=not.is.null", { method: "DELETE" }),
@@ -1708,7 +1711,7 @@ export default function FinanzasApp() {
             <HistorialTab />
           )}
           {tab === "reset" && (
-            <ResetTab onReset={resetearTodo} />
+            <ResetTab onReset={resetearTodo} onResetOverrides={resetearReglasAprendidas} />
           )}
           {tab === "hogar" && (
             <HogarTab
@@ -3440,11 +3443,15 @@ function RecurrentesTab({ recurrentes, categories, onAdd, onToggleActivo, onEdit
   );
 }
 
-function ResetTab({ onReset }) {
+function ResetTab({ onReset, onResetOverrides }) {
   const [confirmText, setConfirmText] = useState("");
   const [resetting, setResetting] = useState(false);
   const [done, setDone] = useState(false);
   const FRASE = "BORRAR TODO";
+
+  const [confirmandoReglas, setConfirmandoReglas] = useState(false);
+  const [resetingReglas, setResetingReglas] = useState(false);
+  const [reglasReseteadas, setReglasReseteadas] = useState(false);
 
   async function handleReset() {
     setResetting(true);
@@ -3454,35 +3461,70 @@ function ResetTab({ onReset }) {
     setConfirmText("");
   }
 
+  async function handleResetReglas() {
+    setResetingReglas(true);
+    await onResetOverrides();
+    setResetingReglas(false);
+    setConfirmandoReglas(false);
+    setReglasReseteadas(true);
+  }
+
   return (
-    <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
-      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6, color: BRICK }}>Reiniciar datos</div>
-      <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
-        Pensado para esta etapa de pruebas. Esto borra <b>TODOS</b> los movimientos, presupuestos, reglas de categorización aprendidas, y el historial de cambios — de forma permanente, sin poder deshacerlo. No borra tu perfil ni los nombres guardados.
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Reglas de categorización aprendidas</div>
+        <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
+          Son las reglas que la app aprendió cada vez que recategorizaste algo a mano (para que las próximas importaciones de PDF/CSV categoricen solas). Borrarlas no toca ningún movimiento ni categoría — solo hace que tengas que volver a enseñarle esas reglas si las necesitás de nuevo.
+        </div>
+        {reglasReseteadas ? (
+          <div style={{ background: "#e8f3ec", border: `1px solid ${GREEN}`, borderRadius: 8, padding: 12, fontSize: 13 }}>
+            Listo, se borraron las reglas aprendidas.
+          </div>
+        ) : confirmandoReglas ? (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={handleResetReglas} disabled={resetingReglas} style={{ ...btnPrimary, background: BRICK, flex: 1, justifyContent: "center" }}>
+              {resetingReglas ? "Borrando..." : "Sí, borrar las reglas"}
+            </button>
+            <button onClick={() => setConfirmandoReglas(false)} style={{ ...btnOutline, flex: 1, justifyContent: "center" }}>
+              Cancelar
+            </button>
+          </div>
+        ) : (
+          <button onClick={() => setConfirmandoReglas(true)} style={{ ...btnOutline, color: BRICK, borderColor: BRICK, justifyContent: "center", width: "100%" }}>
+            Borrar reglas de categorización aprendidas
+          </button>
+        )}
       </div>
 
-      {done ? (
-        <div style={{ background: "#e8f3ec", border: `1px solid ${GREEN}`, borderRadius: 8, padding: 12, fontSize: 13 }}>
-          Listo, se borró todo. La app queda como recién instalada.
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6, color: BRICK }}>Reiniciar datos</div>
+        <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 14 }}>
+          Pensado para esta etapa de pruebas. Esto borra <b>TODOS</b> los movimientos, presupuestos, recurrentes, accesos rápidos y el historial de cambios — de forma permanente, sin poder deshacerlo. No borra tu perfil, tus categorías, ni las reglas de categorización aprendidas.
         </div>
-      ) : (
-        <>
-          <label style={labelStyle}>Para confirmar, escribí exactamente: <b>{FRASE}</b></label>
-          <input
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-            placeholder={FRASE}
-            style={{ ...inputStyle, marginBottom: 14 }}
-          />
-          <button
-            onClick={handleReset}
-            disabled={confirmText.trim().toUpperCase() !== FRASE || resetting}
-            style={{ ...btnPrimary, background: BRICK, width: "100%", justifyContent: "center" }}
-          >
-            {resetting ? "Borrando todo..." : "Borrar todos los datos"}
-          </button>
-        </>
-      )}
+
+        {done ? (
+          <div style={{ background: "#e8f3ec", border: `1px solid ${GREEN}`, borderRadius: 8, padding: 12, fontSize: 13 }}>
+            Listo, se borró todo. La app queda como recién instalada.
+          </div>
+        ) : (
+          <>
+            <label style={labelStyle}>Para confirmar, escribí exactamente: <b>{FRASE}</b></label>
+            <input
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder={FRASE}
+              style={{ ...inputStyle, marginBottom: 14 }}
+            />
+            <button
+              onClick={handleReset}
+              disabled={confirmText.trim().toUpperCase() !== FRASE || resetting}
+              style={{ ...btnPrimary, background: BRICK, width: "100%", justifyContent: "center" }}
+            >
+              {resetting ? "Borrando todo..." : "Borrar todos los datos"}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
