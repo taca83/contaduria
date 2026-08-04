@@ -51,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v74 · 2026-08-03 · carga por voz también detecta automáticamente Pagado vs Pendiente ("tengo que pagar", "vence", etc.)
-const APP_VERSION = "v74 · 2026-08-03";
+// v75 · 2026-08-03 · accesos rápidos: selector Personal / Del hogar (solo el dueño edita/borra, ambos tipos son tocables por quien los ve)
+const APP_VERSION = "v75 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1236,6 +1236,7 @@ export default function FinanzasApp() {
       account: datos.account || "",
       moneda: "ARS",
       sort_order: accesosRapidos.length,
+      personal: datos.personal !== false,
     };
     const next = [...accesosRapidos, nuevo];
     setAccesosRapidos(next);
@@ -1791,6 +1792,7 @@ export default function FinanzasApp() {
             <AccesosRapidosTab
               accesosRapidos={accesosRapidos}
               categories={categories}
+              currentUserId={session?.user?.id}
               onRegistrar={registrarAccesoRapido}
               onAdd={addAccesoRapido}
               onEdit={editAccesoRapido}
@@ -3476,12 +3478,13 @@ function AdminTab() {
   );
 }
 
-function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onEdit, onDelete }) {
+function AccesosRapidosTab({ accesosRapidos, categories, currentUserId, onRegistrar, onAdd, onEdit, onDelete }) {
   const [editando, setEditando] = useState(false);
   const [nombre, setNombre] = useState("");
   const [categoria, setCategoria] = useState(categories[0] || "Otros");
   const [monto, setMonto] = useState("");
   const [cuenta, setCuenta] = useState("");
+  const [personal, setPersonal] = useState(true);
   const [agregando, setAgregando] = useState(false);
   const [addError, setAddError] = useState(null);
 
@@ -3493,12 +3496,13 @@ function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onE
     if (!nombre.trim() || !monto || Number(monto) <= 0) return;
     setAddError(null);
     setAgregando(true);
-    const res = await onAdd({ desc: nombre.trim(), category: categoria, amount: monto, account: cuenta });
+    const res = await onAdd({ desc: nombre.trim(), category: categoria, amount: monto, account: cuenta, personal });
     setAgregando(false);
     if (res?.error) { setAddError(res.error); return; }
     setNombre("");
     setMonto("");
     setCuenta("");
+    setPersonal(true);
   }
 
   function empezarEdicion(a) {
@@ -3535,6 +3539,19 @@ function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onE
           <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 14, fontSize: 18, fontFamily: "'IBM Plex Mono', monospace" }} />
           <label style={labelStyle}>Cuenta (opcional)</label>
           <input value={cuenta} onChange={(e) => setCuenta(e.target.value)} placeholder="Ej: Efectivo" style={{ ...inputStyle, marginBottom: 14 }} />
+          <label style={labelStyle}>Visibilidad</label>
+          <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+            {[[true, "Personal"], [false, "Del hogar"]].map(([val, label]) => (
+              <button key={String(val)} onClick={() => setPersonal(val)} style={{
+                flex: 1, padding: "8px 6px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                border: `1.5px solid ${personal === val ? TEAL : "#ddd6c4"}`,
+                background: personal === val ? TEAL : "#fff", color: personal === val ? "#fff" : INK,
+              }}>{label}</button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: "#8a9698", marginTop: -8, marginBottom: 14 }}>
+            {personal ? "Solo vos lo vas a ver y usar." : "Todos los miembros del hogar lo van a ver y podrán usarlo (pero solo vos podés editarlo o borrarlo)."}
+          </div>
           {addError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 10 }}>{addError}</div>}
           <button onClick={handleAdd} disabled={agregando} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
             {agregando ? "Agregando..." : "Agregar acceso rápido"}
@@ -3549,6 +3566,7 @@ function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onE
           </div>
         ) : accesosRapidos.map((a) => {
           const enEdicion = editandoId === a.id;
+          const esMio = !currentUserId || a.user_id === currentUserId;
           if (editando) {
             return (
               <div key={a.id} style={{ background: "#fff", borderRadius: 10, padding: 12, boxShadow: "0 1px 4px rgba(27,42,46,0.06)" }}>
@@ -3563,13 +3581,23 @@ function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onE
                   </>
                 ) : (
                   <>
-                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.descripcion || a.category}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 2 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{a.descripcion || a.category}</div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 8 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 8, background: a.personal ? "#e8f0f0" : "#fdf1de", color: a.personal ? TEAL : GOLD }}>
+                        {a.personal ? "Personal" : "Del hogar"}
+                      </span>
+                      {!esMio && <span style={{ fontSize: 10, color: "#8a9698" }}>· de {a.who || "otro miembro"}</span>}
+                    </div>
                     <div style={{ fontSize: 11.5, color: "#8a9698", marginBottom: 8 }}>{a.category}</div>
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{fmtARS(a.amount)}</div>
-                    <div style={{ display: "flex", gap: 10 }}>
-                      <button onClick={() => empezarEdicion(a)} style={{ background: "none", border: "none", cursor: "pointer", color: TEAL }}><Pencil size={15} /></button>
-                      <button onClick={() => onDelete(a.id)} style={{ background: "none", border: "none", cursor: "pointer", color: BRICK }}><Trash2 size={15} /></button>
-                    </div>
+                    {esMio && (
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <button onClick={() => empezarEdicion(a)} style={{ background: "none", border: "none", cursor: "pointer", color: TEAL }}><Pencil size={15} /></button>
+                        <button onClick={() => onDelete(a.id)} style={{ background: "none", border: "none", cursor: "pointer", color: BRICK }}><Trash2 size={15} /></button>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -3585,7 +3613,10 @@ function AccesosRapidosTab({ accesosRapidos, categories, onRegistrar, onAdd, onE
               }}
             >
               <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.descripcion || a.category}</div>
-              <div style={{ fontSize: 11, color: "#8a9698", marginBottom: 8 }}>{a.category}</div>
+              <span style={{ fontSize: 9.5, fontWeight: 700, padding: "1px 6px", borderRadius: 8, background: a.personal ? "#e8f0f0" : "#fdf1de", color: a.personal ? TEAL : GOLD }}>
+                {a.personal ? "Personal" : "Del hogar"}
+              </span>
+              <div style={{ fontSize: 11, color: "#8a9698", marginTop: 6, marginBottom: 8 }}>{a.category}</div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 16, color: BRICK }}>{fmtARS(a.amount)}</div>
             </button>
           );
