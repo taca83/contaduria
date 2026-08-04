@@ -51,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v70 · 2026-08-03 · las 3 opciones del botón central (manual/voz/foto) ahora tienen el mismo ancho fijo, prolijas y alineadas
-const APP_VERSION = "v70 · 2026-08-03";
+// v74 · 2026-08-03 · carga por voz también detecta automáticamente Pagado vs Pendiente ("tengo que pagar", "vence", etc.)
+const APP_VERSION = "v74 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -372,6 +372,7 @@ function parsearFacturaColegio(fullText, overrides = {}) {
     amount: monto,
     desc,
     account: "Colegio",
+    pagado: false, // los aranceles se suben antes de pagarlos, normalmente
   });
 
   return { filas, avisos };
@@ -428,7 +429,15 @@ function extraerDatosDeTexto(texto, categories = []) {
     date = d.toISOString().slice(0, 10);
   }
 
-  return { type, amount, category, date, desc: (texto || "").trim() };
+  // Si describe algo ya hecho ("gasté", "pagué") lo marcamos Pagado. Si
+  // describe algo pendiente ("tengo que pagar", "vence", "factura de...
+  // que hay que pagar"), lo marcamos como Pendiente de pago.
+  let pagado = true;
+  if (/tengo que pagar|hay que pagar|debo pagar|falta pagar|todav[ií]a no (lo )?pagu[eé]|vence|vencimiento|a pagar\b/.test(t)) {
+    pagado = false;
+  }
+
+  return { type, amount, category, date, desc: (texto || "").trim(), pagado };
 }
 
 function monthKey(dateStr) {
@@ -594,6 +603,7 @@ function entryFromDb(row) {
     moneda: row.moneda || "ARS",
     recurringId: row.recurring_id || undefined,
     generatedMonth: row.generated_month || undefined,
+    pagado: row.pagado !== false, // default true si no viene (compatibilidad con filas viejas)
   };
 }
 // Mapea un entry de la app al shape de la tabla `entries` (Supabase)
@@ -612,6 +622,7 @@ function entryToDb(e) {
     moneda: e.moneda || "ARS",
     recurring_id: e.recurringId || null,
     generated_month: e.generatedMonth || null,
+    pagado: e.pagado !== false,
   };
 }
 
@@ -658,6 +669,34 @@ export default function FinanzasApp() {
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState(null); // { access_token, refresh_token, user }
   const [householdId, setHouseholdId] = useState(null);
+
+  // Refresca solo los movimientos (lo que más cambia "por afuera" de esta
+  // sesión, ej. algo cargado por WhatsApp mientras la app estaba abierta) —
+  // liviano, sin volver a traer categorías/presupuestos/etc.
+  async function refrescarEntries() {
+    if (!HAS_SUPABASE || !householdId) return;
+    try {
+      const entRows = await sb(`entries?household_id=eq.${householdId}&select=*&order=date.desc`);
+      setEntries((entRows || []).map(entryFromDb));
+    } catch (e) {
+      console.error("No se pudo refrescar movimientos", e);
+    }
+  }
+
+  useEffect(() => {
+    if (!HAS_SUPABASE || !householdId) return;
+    function alVolver() {
+      if (document.visibilityState === "visible") refrescarEntries();
+    }
+    document.addEventListener("visibilitychange", alVolver);
+    window.addEventListener("focus", refrescarEntries);
+    const intervalo = setInterval(refrescarEntries, 45000); // respaldo cada 45s
+    return () => {
+      document.removeEventListener("visibilitychange", alVolver);
+      window.removeEventListener("focus", refrescarEntries);
+      clearInterval(intervalo);
+    };
+  }, [householdId]);
   const [profileName, setProfileName] = useState(null); // display_name dentro del hogar
   const [entries, setEntries] = useState([]);
   const [budgets, setBudgets] = useState({});
@@ -1031,6 +1070,18 @@ export default function FinanzasApp() {
     await logAudit("edit_monto", anterior, anterior?.amount, nuevoMonto);
     if (!HAS_SUPABASE) return;
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ amount: nuevoMonto }) });
+  }
+
+  async function toggleEntryPagado(id, nuevoValor) {
+    const anterior = entries.find((e) => e.id === id);
+    setEntries((prev) => {
+      const next = prev.map((e) => e.id === id ? { ...e, pagado: nuevoValor } : e);
+      if (!HAS_SUPABASE) mockSaveEntries(next);
+      return next;
+    });
+    await logAudit("marcar_pagado", anterior, anterior?.pagado, nuevoValor);
+    if (!HAS_SUPABASE) return;
+    await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ pagado: nuevoValor }) });
   }
 
   async function addCategory(nombre) {
@@ -1646,10 +1697,11 @@ export default function FinanzasApp() {
               cambiosStats={cambiosStats}
               totalGastosUsd={totalGastosUsd}
               isDesktop={isDesktop}
+              selectedMonth={selectedMonth}
             />
           )}
           {tab === "movimientos" && (
-            <MovimientosTab allEntries={entries} entries={thisMonthEntries} onDelete={deleteEntry} onEditDesc={editEntryDesc} onEditAmount={editEntryAmount} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
+            <MovimientosTab allEntries={entries} entries={thisMonthEntries} onDelete={deleteEntry} onEditDesc={editEntryDesc} onEditAmount={editEntryAmount} onTogglePagado={toggleEntryPagado} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
           )}
           {tab === "ahorros" && (
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
@@ -2016,7 +2068,7 @@ function DivisasTab({ cambiosStats, cambios, onDelete }) {
   );
 }
 
-function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd, isDesktop }) {
+function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd, isDesktop, selectedMonth }) {
   const [expandedCat, setExpandedCat] = useState(null);
   const [rango, setRango] = useState(6);
   const [compareMode, setCompareMode] = useState(false);
@@ -2024,6 +2076,38 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   // Ventana de 3 meses para "Resumen mensual" en el celu, navegable con
   // flechas — independiente del selector de rango de Evolución de arriba.
   const [resumenOffset, setResumenOffset] = useState(0);
+
+  // Umbral para las alertas de "gasto que subió mucho" — se guarda en este
+  // dispositivo para no tener que reconfigurarlo cada vez.
+  const [umbralAlerta, setUmbralAlerta] = useState(() => Number(safeGet("umbral_alerta_gastos")) || 20);
+  useEffect(() => { safeSet("umbral_alerta_gastos", umbralAlerta); }, [umbralAlerta]);
+
+  const alertasGasto = useMemo(() => {
+    const [y, m] = selectedMonth.split("-").map(Number);
+    const mesAnteriorKey = new Date(y, m - 2, 1).toISOString().slice(0, 7);
+
+    const porCategoriaActual = {};
+    const porCategoriaAnterior = {};
+    entries.forEach((e) => {
+      if (e.type !== "gasto" || (e.moneda || "ARS") !== "ARS") return;
+      const mk = monthKey(e.date);
+      if (mk === selectedMonth) porCategoriaActual[e.category] = (porCategoriaActual[e.category] || 0) + Number(e.amount);
+      else if (mk === mesAnteriorKey) porCategoriaAnterior[e.category] = (porCategoriaAnterior[e.category] || 0) + Number(e.amount);
+    });
+
+    const resultado = [];
+    Object.keys(porCategoriaActual).forEach((cat) => {
+      const actual = porCategoriaActual[cat];
+      const anterior = porCategoriaAnterior[cat] || 0;
+      if (anterior > 0) {
+        const variacion = ((actual - anterior) / anterior) * 100;
+        if (variacion >= umbralAlerta) resultado.push({ categoria: cat, actual, anterior, variacion, nueva: false });
+      } else if (actual > 0) {
+        resultado.push({ categoria: cat, actual, anterior: 0, variacion: null, nueva: true });
+      }
+    });
+    return resultado.sort((a, b) => (b.variacion ?? 999999) - (a.variacion ?? 999999));
+  }, [entries, selectedMonth, umbralAlerta]);
 
   function calcularMes(key) {
     const [y, m] = key.split("-").map(Number);
@@ -2087,6 +2171,45 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>⚠️ Aumentos de gasto</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8a9698" }}>
+            Avisame si sube más de
+            <input
+              type="number"
+              value={umbralAlerta}
+              onChange={(e) => setUmbralAlerta(Math.max(1, Number(e.target.value) || 1))}
+              style={{ width: 52, padding: "3px 6px", borderRadius: 6, border: "1px solid #ddd6c4", fontSize: 12.5, textAlign: "center" }}
+            />
+            %
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 12 }}>
+          Comparando el mes que estás mirando con el anterior.
+        </div>
+        {alertasGasto.length === 0 ? (
+          <EmptyState text={`Ninguna categoría subió más de ${umbralAlerta}% respecto al mes anterior.`} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {alertasGasto.map((a) => (
+              <div key={a.categoria} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "#fbeee6", borderRadius: 8 }}>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 700 }}>{a.categoria}</div>
+                  <div style={{ fontSize: 11.5, color: "#8a9698" }}>
+                    {a.nueva ? "Sin gasto el mes anterior" : `${fmtARS(a.anterior)} → ${fmtARS(a.actual)}`}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color: BRICK, fontSize: 14 }}>{fmtARS(a.actual)}</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: BRICK }}>{a.nueva ? "Nuevo" : `+${Math.round(a.variacion)}%`}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div style={isDesktop ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, alignItems: "start" } : { display: "contents" }}>
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Gastos por categoría (este mes)</div>
@@ -2304,7 +2427,7 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   );
 }
 
-function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmount, profileName, monthLabel }) {
+function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmount, onTogglePagado, profileName, monthLabel }) {
   const [filter, setFilter] = useState("todos");
   const [busq, setBusq] = useState("");
   const [alcance, setAlcance] = useState("mes"); // "mes" | "historial"
@@ -2336,7 +2459,9 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
 
   const base = usaTodo ? allEntries : entries;
   const filtered = base.filter((e) => {
-    const pasaTipo = filter === "todos" ? (e.type === "gasto" || e.type === "ingreso") : e.type === filter;
+    const pasaTipo = filter === "todos" ? (e.type === "gasto" || e.type === "ingreso")
+      : filter === "pendientes" ? (e.type === "gasto" && e.pagado === false)
+      : e.type === filter;
     if (!pasaTipo) return false;
     if (!buscando) return true;
     const q = busq.trim().toLowerCase();
@@ -2371,7 +2496,7 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
         ))}
       </div>
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-        {[["todos", "Todos"], ["gasto", "Gastos"], ["ingreso", "Ingresos"], ["cambio", "Cambios USD"]].map(([k, l]) => (
+        {[["todos", "Todos"], ["gasto", "Gastos"], ["ingreso", "Ingresos"], ["cambio", "Cambios USD"], ["pendientes", "Pendientes de pago"]].map(([k, l]) => (
           <button key={k} onClick={() => setFilter(k)} style={{
             padding: "6px 12px", borderRadius: 20, fontSize: 12.5, cursor: "pointer",
             border: `1px solid ${filter === k ? TEAL : "#ddd6c4"}`,
@@ -2422,11 +2547,23 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
                         </div>
                       </div>
                     ) : (
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
                         <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.category}{e.desc ? ` · ${e.desc}` : ""}</div>
                         {e.type !== "cambio" && (
                           <button onClick={() => startEdit(e)} style={{ border: "none", background: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }} aria-label="Editar descripción y monto">
                             <Pencil size={13} />
+                          </button>
+                        )}
+                        {e.type === "gasto" && e.pagado === false && (
+                          <button
+                            onClick={() => onTogglePagado(e.id, true)}
+                            title="Tocá para marcar como pagado"
+                            style={{
+                              fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 10,
+                              background: "#fdf1de", color: GOLD, border: `1px solid ${GOLD}`, cursor: "pointer", flexShrink: 0,
+                            }}
+                          >
+                            Pendiente
                           </button>
                         )}
                       </div>
@@ -4117,6 +4254,7 @@ function FotoReciboModal({ onClose, onExtracted, categories }) {
         category: categoriaFinal,
         date: resultado.fecha || todayISO(),
         desc: detalle,
+        pagado: resultado.pagado !== false,
       });
     } catch (e) {
       setError("No pude leer el recibo: " + e.message);
@@ -4298,6 +4436,7 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
   const [rate, setRate] = useState("");
   const [account, setAccount] = useState("");
   const [moneda, setMoneda] = useState("ARS");
+  const [pagado, setPagado] = useState(initialData?.pagado !== undefined ? initialData.pagado : true);
 
   const cats = type === "gasto" ? categories : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR;
   const arsFromCambio = (Number(usdAmount) || 0) * (Number(rate) || 0);
@@ -4327,7 +4466,7 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
       return;
     }
     if (!montoCalculado || montoCalculado <= 0) return;
-    onSave({ type, amount: montoCalculado, category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS" });
+    onSave({ type, amount: montoCalculado, category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS", pagado: type === "gasto" ? pagado : true });
   }
 
   return (
@@ -4425,6 +4564,26 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
 
         <label style={labelStyle}>Descripción (opcional)</label>
         <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Ej: supermercado del sábado" style={{ ...inputStyle, marginBottom: 14 }} />
+
+        {type === "gasto" && (
+          <>
+            <label style={labelStyle}>Estado</label>
+            <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+              {[[true, "Pagado", GREEN], [false, "Pendiente de pago", GOLD]].map(([val, label, color]) => (
+                <button key={String(val)} onClick={() => setPagado(val)} style={{
+                  flex: 1, padding: "8px 6px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                  border: `1.5px solid ${pagado === val ? color : "#ddd6c4"}`,
+                  background: pagado === val ? color : "#fff", color: pagado === val ? "#fff" : INK,
+                }}>{label}</button>
+              ))}
+            </div>
+            {!pagado && (
+              <div style={{ fontSize: 11.5, color: "#8a9698", marginTop: -8, marginBottom: 14 }}>
+                Útil para facturas/aranceles que cargás antes de pagarlos — lo marcás como "Pagado" después, desde Movimientos.
+              </div>
+            )}
+          </>
+        )}
 
         <label style={labelStyle}>Fecha</label>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle, marginBottom: 20 }} />
