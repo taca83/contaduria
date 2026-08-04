@@ -51,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v75 · 2026-08-03 · accesos rápidos: selector Personal / Del hogar (solo el dueño edita/borra, ambos tipos son tocables por quien los ve)
-const APP_VERSION = "v75 · 2026-08-03";
+// v76 · 2026-08-03 · Gastos rápidos: "Editar" y "Agregar" separados en dos botones/estados independientes
+const APP_VERSION = "v76 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -3480,6 +3480,7 @@ function AdminTab() {
 
 function AccesosRapidosTab({ accesosRapidos, categories, currentUserId, onRegistrar, onAdd, onEdit, onDelete }) {
   const [editando, setEditando] = useState(false);
+  const [mostrarForm, setMostrarForm] = useState(false);
   const [nombre, setNombre] = useState("");
   const [categoria, setCategoria] = useState(categories[0] || "Otros");
   const [monto, setMonto] = useState("");
@@ -3503,6 +3504,7 @@ function AccesosRapidosTab({ accesosRapidos, categories, currentUserId, onRegist
     setMonto("");
     setCuenta("");
     setPersonal(true);
+    setMostrarForm(false);
   }
 
   function empezarEdicion(a) {
@@ -3521,12 +3523,17 @@ function AccesosRapidosTab({ accesosRapidos, categories, currentUserId, onRegist
         <div style={{ fontSize: 13, color: "#8a9698" }}>
           Un toque y listo: gastos que se repiten con el mismo monto y categoría (psicóloga, nafta, cochera...).
         </div>
-        <button onClick={() => setEditando((v) => !v)} style={{ ...btnOutline, padding: "6px 10px", fontSize: 12, flexShrink: 0 }}>
-          {editando ? "Listo" : "Editar"}
-        </button>
+        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+          <button onClick={() => setEditando((v) => !v)} style={{ ...btnOutline, padding: "6px 10px", fontSize: 12 }}>
+            {editando ? "Listo" : "Editar"}
+          </button>
+          <button onClick={() => setMostrarForm((v) => !v)} style={mostrarForm ? { ...btnOutline, padding: "6px 10px", fontSize: 12 } : { ...btnPrimary, padding: "6px 10px", fontSize: 12 }}>
+            {mostrarForm ? "Cancelar" : (<><Plus size={14} /> Agregar</>)}
+          </button>
+        </div>
       </div>
 
-      {editando && (
+      {mostrarForm && (
         <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Nuevo acceso rápido</div>
           <label style={labelStyle}>Nombre</label>
