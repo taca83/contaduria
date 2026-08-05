@@ -66,8 +66,8 @@ function clasificarMedioPago(cuenta) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v96 · 2026-08-03 · Resumen: tarjeta "Pendientes de pago" (todo el historial, marcar pagado ahí mismo) · Cuentas: agrupado por medio de pago macro (Efectivo/Mercado Pago/Tarjetas de crédito/Otros), expandible por tarjeta real
-const APP_VERSION = "v96 · 2026-08-03";
+// v97 · 2026-08-03 · fix crítico: el "Total a pagar" de BBVA ya no cae en la fecha de hoy si no encuentra el vencimiento (usa cierre o último consumo, y avisa); además ahora se importa "SU PAGO EN PESOS" para que aparezca como opción en Conciliar pagos
+const APP_VERSION = "v97 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -249,9 +249,39 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   const cuenta = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
 
   let seccionActual = null; // "Hernan Israel" | "Natalia Wajsman" | null
+  let enSeccionPagos = false;
   const LINEA_MOV = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+(.+?)\s+(\d{6})\s+(-?[\d.,]+)\s*$/;
+  const LINEA_PAGO = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+SU PAGO EN PESOS\s+(-?[\d.,]+)\s*$/i;
 
   lineas.forEach((linea) => {
+    if (/^Sus pagos y ajustes realizados/i.test(linea)) { enSeccionPagos = true; return; }
+    if (enSeccionPagos) {
+      // "SU PAGO EN USD" y cualquier otra línea que no sea "SU PAGO EN
+      // PESOS" no nos interesan acá (ya se maneja el USD aparte, y otros
+      // ajustes son casos borde poco frecuentes).
+      const pago = linea.match(LINEA_PAGO);
+      if (pago) {
+        const [, dd, mmm, yy, montoRaw] = pago;
+        const fecha = fechaBbvaAIso(dd, mmm, yy);
+        const monto = Math.abs(Number(montoRaw.replace(/\./g, "").replace(",", ".")));
+        if (fecha && monto > 0) {
+          filas.push({
+            date: fecha,
+            type: "gasto",
+            category: "Tarjetas",
+            amount: monto,
+            desc: `Pago de tarjeta ${cuenta} (SU PAGO EN PESOS)`,
+            account: cuenta,
+            pagado: true, // esto ES el pago real — no es una deuda pendiente
+          });
+        }
+      }
+      if (/^Consumos\s+(Hernan Israel|Natalia Wajsman)/i.test(linea)) {
+        enSeccionPagos = false;
+        seccionActual = /Natalia/i.test(linea) ? "Natalia Wajsman" : "Hernan Israel";
+      }
+      return;
+    }
     if (/^Consumos\s+(Hernan Israel|Natalia Wajsman)/i.test(linea)) {
       seccionActual = /Natalia/i.test(linea) ? "Natalia Wajsman" : "Hernan Israel";
       return;
@@ -291,10 +321,31 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   if (totalMatch) {
     const totalAPagar = Number(totalMatch[1].replace(/\./g, "").replace(",", "."));
     const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
-    const fechaVenc = vencMatch ? fechaBbvaAIso(vencMatch[1], vencMatch[2], vencMatch[3]) : todayISO();
-    if (totalAPagar > 0) {
+    const cierreMatch = textoCompleto.match(/CIERRE ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+
+    // Cadena de respaldo para la fecha — NUNCA cae en "hoy" (eso mandaría
+    // un resumen de diciembre a la fecha real en la que lo importás, un
+    // bug serio que ya pasó una vez). Si no hay vencimiento ni cierre
+    // legibles, usamos la fecha del consumo más reciente que sí pudimos
+    // leer en este mismo PDF — siempre va a ser un dato REAL del resumen.
+    let fechaVenc = null;
+    let origenFecha = "";
+    if (vencMatch) {
+      fechaVenc = fechaBbvaAIso(vencMatch[1], vencMatch[2], vencMatch[3]);
+      origenFecha = "vencimiento";
+    }
+    if (!fechaVenc && cierreMatch) {
+      fechaVenc = fechaBbvaAIso(cierreMatch[1], cierreMatch[2], cierreMatch[3]);
+      origenFecha = "cierre";
+    }
+    if (!fechaVenc && filas.length > 0) {
+      fechaVenc = [...filas].sort((a, b) => b.date.localeCompare(a.date))[0].date;
+      origenFecha = "último consumo del resumen";
+    }
+
+    if (totalAPagar > 0 && fechaVenc) {
       filas.push({
-        date: fechaVenc || todayISO(),
+        date: fechaVenc,
         type: "gasto",
         category: "Tarjetas",
         amount: totalAPagar,
@@ -302,6 +353,11 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
         account: cuenta,
         pagado: false,
       });
+      if (origenFecha !== "vencimiento") {
+        avisos.push(`El "Total a pagar" de ${cuenta} quedó fechado por ${origenFecha} (no encontré el vencimiento) — revisá que la fecha sea la correcta.`);
+      }
+    } else if (totalAPagar > 0) {
+      avisos.push(`No pude leer ninguna fecha confiable para el "Total a pagar" de ${cuenta} — no lo agregué. Cargalo a mano si hace falta.`);
     } else {
       avisos.push("No pude leer el total a pagar del resumen (revisá el monto a mano).");
     }
