@@ -7,7 +7,7 @@ import {
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
   ArrowUpRight, ArrowDownRight, ArrowLeft, ArrowLeftRight, Landmark, Settings, Trash2, User, Download, Menu,
-  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera, Clock, Tag, Copy, History, LogOut
+  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera, Clock, Tag, Copy, History, LogOut, Eye, EyeOff
 } from "lucide-react";
 
 const DEFAULT_GASTO_CATS = ["Comida", "Tarjetas", "Ropa", "Salud", "Educación", "Transporte", "Ocio", "Servicios", "Vivienda", "Otros"];
@@ -66,8 +66,8 @@ function clasificarMedioPago(cuenta) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v100 · 2026-08-03 · cada movimiento registra cómo se cargó (manual/voz/foto/PDF/recurrente/acceso rápido/WhatsApp) y cuándo, visible al editar; Conciliar pagos ahora matchea también por N° de comprobante compartido
-const APP_VERSION = "v100 · 2026-08-03";
+// v101 · 2026-08-03 · login: "¿Olvidaste tu contraseña?" (mail de recuperación + pantalla para elegir una nueva) y ojito para mostrar/ocultar la contraseña
+const APP_VERSION = "v101 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -975,9 +975,28 @@ export default function FinanzasApp() {
   }
 
   // --- pantalla de login/registro ---
-  const [authMode, setAuthMode] = useState("login"); // "login" | "signup" | "onboarding"
+  const [authMode, setAuthMode] = useState("login"); // "login" | "signup" | "onboarding" | "recover" | "reset"
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [recoverAccessToken, setRecoverAccessToken] = useState(null);
+  const [recoverNewPassword, setRecoverNewPassword] = useState("");
+  const [recoverMsg, setRecoverMsg] = useState(null);
+
+  // Si la persona llegó acá desde el link del mail de "recuperar
+  // contraseña", Supabase la redirige con el token en el hash de la URL
+  // (#access_token=...&type=recovery) — lo detectamos y mostramos
+  // directamente la pantalla de "elegí tu nueva contraseña".
+  useEffect(() => {
+    try {
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      if (hash.get("type") === "recovery" && hash.get("access_token")) {
+        setRecoverAccessToken(hash.get("access_token"));
+        setAuthMode("reset");
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      }
+    } catch {}
+  }, []);
   const [authDisplayName, setAuthDisplayName] = useState("");
   const [authInviteCode, setAuthInviteCode] = useState(() => {
     try {
@@ -1164,6 +1183,52 @@ export default function FinanzasApp() {
       setSession(data);
       await cargarHogarYDatos(data.access_token);
       setDesbloqueado(true);
+    } catch (e) {
+      setAuthError(e.message);
+    }
+    setAuthBusy(false);
+  }
+
+  // Manda el mail de "recuperar contraseña" (Supabase se encarga de
+  // enviarlo — no hace falta ninguna Edge Function propia para esto).
+  async function handleForgotPassword() {
+    setAuthError(null);
+    setRecoverMsg(null);
+    if (!authEmail.trim()) { setAuthError("Escribí tu email primero."); return; }
+    setAuthBusy(true);
+    try {
+      await sbAuth("recover", {
+        method: "POST",
+        body: JSON.stringify({ email: authEmail.trim(), options: { redirectTo: window.location.origin } }),
+      });
+      setRecoverMsg(`Te mandamos un mail a ${authEmail.trim()} con el link para elegir una contraseña nueva.`);
+    } catch (e) {
+      // Por seguridad, Supabase a veces no distingue "no existe" de "error real"
+      // — igual mostramos el mensaje que haya devuelto.
+      setAuthError(e.message);
+    }
+    setAuthBusy(false);
+  }
+
+  // Confirma la nueva contraseña usando el token que vino en el link del mail.
+  async function handleResetPassword() {
+    setAuthError(null);
+    if (!recoverNewPassword || recoverNewPassword.length < 6) {
+      setAuthError("La contraseña tiene que tener al menos 6 caracteres.");
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      await sbAuth("user", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${recoverAccessToken}` },
+        body: JSON.stringify({ password: recoverNewPassword }),
+      });
+      setRecoverMsg("Listo, tu contraseña quedó actualizada. Iniciá sesión con la nueva.");
+      setAuthMode("login");
+      setRecoverAccessToken(null);
+      setRecoverNewPassword("");
+      setAuthPassword("");
     } catch (e) {
       setAuthError(e.message);
     }
@@ -1741,6 +1806,68 @@ export default function FinanzasApp() {
       );
     }
 
+    // --- Recuperar contraseña: pedir el mail ---
+    if (authMode === "recover") {
+      return (
+        <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
+          <style>{fontImports}</style>
+          <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 400, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: INK, marginBottom: 6 }}>Recuperar contraseña</div>
+            <div style={{ color: "#5a6b6d", fontSize: 13.5, marginBottom: 20 }}>
+              Escribí el email de tu cuenta y te mandamos un link para elegir una contraseña nueva.
+            </div>
+            <label style={labelStyle}>Email</label>
+            <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="vos@ejemplo.com" style={{ ...inputStyle, marginBottom: 14 }} />
+            {authError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 12 }}>{authError}</div>}
+            {recoverMsg && <div style={{ color: GREEN, fontSize: 12.5, marginBottom: 12 }}>{recoverMsg}</div>}
+            <button onClick={handleForgotPassword} disabled={authBusy} style={{ ...btnPrimary, width: "100%", justifyContent: "center", marginBottom: 12 }}>
+              {authBusy ? "Enviando..." : "Mandar link de recuperación"}
+            </button>
+            <button
+              onClick={() => { setAuthMode("login"); setAuthError(null); setRecoverMsg(null); }}
+              style={{ background: "none", border: "none", color: TEAL, fontSize: 13, cursor: "pointer", width: "100%" }}
+            >
+              Volver a iniciar sesión
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // --- Recuperar contraseña: llegó desde el link del mail, elige la nueva ---
+    if (authMode === "reset") {
+      return (
+        <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
+          <style>{fontImports}</style>
+          <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 400, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: INK, marginBottom: 6 }}>Elegí tu nueva contraseña</div>
+            <label style={labelStyle}>Contraseña nueva</label>
+            <div style={{ position: "relative", marginBottom: 14 }}>
+              <input
+                type={showPassword ? "text" : "password"}
+                value={recoverNewPassword}
+                onChange={(e) => setRecoverNewPassword(e.target.value)}
+                placeholder="Al menos 6 caracteres"
+                style={{ ...inputStyle, paddingRight: 40 }}
+              />
+              <button
+                onClick={() => setShowPassword((v) => !v)}
+                type="button"
+                aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
+                style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "#8a9698", display: "flex" }}
+              >
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </div>
+            {authError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 12 }}>{authError}</div>}
+            <button onClick={handleResetPassword} disabled={authBusy} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
+              {authBusy ? "Guardando..." : "Guardar contraseña nueva"}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     // --- Login / registro ---
     return (
       <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
@@ -1754,7 +1881,34 @@ export default function FinanzasApp() {
           <label style={labelStyle}>Email</label>
           <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="vos@ejemplo.com" style={{ ...inputStyle, marginBottom: 14 }} />
           <label style={labelStyle}>Contraseña</label>
-          <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="••••••••" style={{ ...inputStyle, marginBottom: 14 }} />
+          <div style={{ position: "relative", marginBottom: authMode === "signup" ? 14 : 6 }}>
+            <input
+              type={showPassword ? "text" : "password"}
+              value={authPassword}
+              onChange={(e) => setAuthPassword(e.target.value)}
+              placeholder="••••••••"
+              style={{ ...inputStyle, paddingRight: 40 }}
+            />
+            <button
+              onClick={() => setShowPassword((v) => !v)}
+              type="button"
+              aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
+              style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "#8a9698", display: "flex" }}
+            >
+              {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+            </button>
+          </div>
+          {authMode !== "signup" && (
+            <div style={{ textAlign: "right", marginBottom: 14 }}>
+              <button
+                onClick={() => { setAuthMode("recover"); setAuthError(null); setRecoverMsg(null); }}
+                type="button"
+                style={{ background: "none", border: "none", color: TEAL, fontSize: 12, cursor: "pointer", padding: 0 }}
+              >
+                ¿Olvidaste tu contraseña?
+              </button>
+            </div>
+          )}
 
           {authMode === "signup" && (
             <>
