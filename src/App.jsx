@@ -6,8 +6,8 @@ import {
 } from "recharts";
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
-  ArrowUpRight, ArrowDownRight, ArrowLeft, Landmark, Settings, Trash2, User, Download, Menu,
-  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera
+  ArrowUpRight, ArrowDownRight, ArrowLeft, ArrowLeftRight, Landmark, Settings, Trash2, User, Download, Menu,
+  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera, Clock
 } from "lucide-react";
 
 const DEFAULT_GASTO_CATS = ["Comida", "Tarjetas", "Ropa", "Salud", "Educación", "Transporte", "Ocio", "Servicios", "Vivienda", "Otros"];
@@ -27,6 +27,7 @@ const TAB_LABELS = {
   categorias: "Categorías",
   recurrentes: "Gastos recurrentes",
   cuentas: "Cuentas",
+  cotizaciones: "Cotizaciones",
   personas: "Por persona",
   conciliar: "Conciliar pagos",
   admin: "Panel admin (ingresos a la app)",
@@ -37,7 +38,7 @@ const PRIMARY_TABS = [
   ["rapidos", "Gastos rápidos", Zap],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "presupuestos", "cuentas", "personas", "recategorizar", "conciliar", "duplicados", "divisas", "historial", "ahorros", "reset"];
+const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "presupuestos", "cuentas", "personas", "cotizaciones", "recategorizar", "conciliar", "duplicados", "divisas", "historial", "ahorros", "reset"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -53,8 +54,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v86 · 2026-08-03 · Mi hogar: editar el nombre de un miembro, con cascada automática a los movimientos viejos que tenían el nombre anterior
-const APP_VERSION = "v86 · 2026-08-03";
+// v88 · 2026-08-03 · nueva pestaña "Cotizaciones": dólar (oficial/blue/MEP/CCL/tarjeta/cripto) vía DolarAPI + crypto vía CoinGecko, con selector de monedas a trackear
+const APP_VERSION = "v88 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1872,6 +1873,7 @@ export default function FinanzasApp() {
             />
           )}
           {tab === "cuentas" && <CuentasTab thisMonthEntries={thisMonthEntries} monthLabel={monthLabel(selectedMonth)} />}
+          {tab === "cotizaciones" && <CotizacionesTab />}
           {tab === "personas" && <PersonasTab thisMonthEntries={thisMonthEntries} monthLabel={monthLabel(selectedMonth)} />}
           {tab === "conciliar" && <ConciliarPagosTab entries={entries} onConfirmar={confirmarConciliacion} />}
           {tab === "admin" && <AdminTab />}
@@ -2610,14 +2612,55 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
           }}>{l}</button>
         ))}
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
-        {[["todos", "Todos"], ["gasto", "Gastos"], ["ingreso", "Ingresos"], ["cambio", "Cambios USD"], ["pendientes", "Pendientes"]].map(([k, l]) => (
-          <button key={k} onClick={() => setFilter(k)} style={{
-            padding: "6px 12px", borderRadius: 20, fontSize: 12.5, cursor: "pointer",
-            border: `1px solid ${filter === k ? TEAL : "#ddd6c4"}`,
-            background: filter === k ? TEAL : "#fff", color: filter === k ? "#fff" : INK, fontWeight: 600
-          }}>{l}</button>
-        ))}
+      <div
+        style={{
+          display: "flex", gap: 8, marginBottom: 14,
+          overflowX: "auto", overflowY: "hidden", flexWrap: "nowrap",
+          paddingBottom: 4, marginLeft: -2, paddingLeft: 2,
+          scrollbarWidth: "none", msOverflowStyle: "none", WebkitOverflowScrolling: "touch",
+        }}
+        className="chips-scroll"
+      >
+        <style>{`.chips-scroll::-webkit-scrollbar { display: none; }`}</style>
+        {[
+          ["todos", "Todos", List],
+          ["gasto", "Gastos", ArrowDownRight],
+          ["ingreso", "Ingresos", ArrowUpRight],
+          ["cambio", "Cambios USD", ArrowLeftRight],
+          ["pendientes", "Pendientes", Clock],
+        ].map(([k, l, Icon]) => {
+          const active = filter === k;
+          const cantidad = base.filter((e) =>
+            k === "todos" ? (e.type === "gasto" || e.type === "ingreso")
+            : k === "pendientes" ? (e.type === "gasto" && e.pagado === false)
+            : e.type === k
+          ).length;
+          return (
+            <button
+              key={k}
+              onClick={() => setFilter(k)}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
+                padding: "8px 14px", borderRadius: 22, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                border: "none",
+                background: active ? TEAL : "#fff",
+                color: active ? "#fff" : INK,
+                boxShadow: active ? "0 3px 10px rgba(15,110,110,0.3)" : "0 1px 3px rgba(27,42,46,0.08)",
+                transition: "background 0.15s ease, box-shadow 0.15s ease",
+              }}
+            >
+              <Icon size={14} />
+              {l}
+              {cantidad > 0 && (
+                <span style={{
+                  fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 10,
+                  background: active ? "rgba(255,255,255,0.25)" : PAPER_DIM,
+                  color: active ? "#fff" : "#8a9698",
+                }}>{cantidad}</span>
+              )}
+            </button>
+          );
+        })}
       </div>
       {filtered.length === 0 ? <EmptyState text="No hay movimientos para mostrar." /> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -3543,6 +3586,167 @@ function ConciliarPagosTab({ entries, onConfirmar }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+const CRIPTOS_DISPONIBLES = [
+  { id: "bitcoin", symbol: "BTC", nombre: "Bitcoin" },
+  { id: "ethereum", symbol: "ETH", nombre: "Ethereum" },
+  { id: "tether", symbol: "USDT", nombre: "Tether" },
+  { id: "usd-coin", symbol: "USDC", nombre: "USD Coin" },
+  { id: "binancecoin", symbol: "BNB", nombre: "BNB" },
+  { id: "solana", symbol: "SOL", nombre: "Solana" },
+  { id: "ripple", symbol: "XRP", nombre: "XRP" },
+  { id: "cardano", symbol: "ADA", nombre: "Cardano" },
+  { id: "dogecoin", symbol: "DOGE", nombre: "Dogecoin" },
+  { id: "polkadot", symbol: "DOT", nombre: "Polkadot" },
+  { id: "litecoin", symbol: "LTC", nombre: "Litecoin" },
+  { id: "avalanche-2", symbol: "AVAX", nombre: "Avalanche" },
+  { id: "chainlink", symbol: "LINK", nombre: "Chainlink" },
+  { id: "matic-network", symbol: "MATIC", nombre: "Polygon" },
+  { id: "tron", symbol: "TRX", nombre: "TRON" },
+];
+
+const DOLAR_LABELS = {
+  oficial: "Oficial",
+  blue: "Blue",
+  bolsa: "MEP",
+  contadoconliqui: "CCL",
+  mayorista: "Mayorista",
+  tarjeta: "Tarjeta",
+  cripto: "Cripto (USDT)",
+};
+
+function CotizacionesTab() {
+  const [dolares, setDolares] = useState(null);
+  const [cripto, setCripto] = useState(null);
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState(null);
+  const [ultimaActualizacion, setUltimaActualizacion] = useState(null);
+  const [trackeadas, setTrackeadas] = useState(() => safeGet("cripto_trackeadas") || ["bitcoin", "ethereum", "tether"]);
+  const [mostrarAgregar, setMostrarAgregar] = useState(false);
+
+  useEffect(() => { safeSet("cripto_trackeadas", trackeadas); }, [trackeadas]);
+
+  async function cargarTodo() {
+    setCargando(true);
+    setError(null);
+    try {
+      const [dolaresRes, criptoRes] = await Promise.all([
+        fetch("https://dolarapi.com/v1/dolares").then((r) => r.json()),
+        trackeadas.length > 0
+          ? fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${trackeadas.join(",")}&vs_currencies=usd&include_24hr_change=true`).then((r) => r.json())
+          : Promise.resolve({}),
+      ]);
+      setDolares(Array.isArray(dolaresRes) ? dolaresRes : []);
+      setCripto(criptoRes || {});
+      setUltimaActualizacion(new Date());
+    } catch (e) {
+      setError("No se pudieron traer las cotizaciones. Probá de nuevo en un rato.");
+    }
+    setCargando(false);
+  }
+
+  useEffect(() => { cargarTodo(); }, [trackeadas]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function toggleCripto(id) {
+    setTrackeadas((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ fontSize: 12.5, color: "#8a9698" }}>
+          {ultimaActualizacion ? `Actualizado ${ultimaActualizacion.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}` : "Cotizaciones en vivo"}
+        </div>
+        <button onClick={cargarTodo} disabled={cargando} style={{ ...btnOutline, padding: "6px 10px", fontSize: 12 }}>
+          {cargando ? "Actualizando..." : "Actualizar"}
+        </button>
+      </div>
+
+      {error && <div style={{ color: BRICK, fontSize: 12.5 }}>{error}</div>}
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Dólar</div>
+        {!dolares ? (
+          <div style={{ fontSize: 13, color: "#8a9698" }}>Cargando...</div>
+        ) : dolares.length === 0 ? (
+          <EmptyState text="No se pudo traer la cotización del dólar." />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            {dolares.map((d) => (
+              <div key={d.casa} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #f2eee2" }}>
+                <span style={{ fontSize: 13.5, fontWeight: 600 }}>{DOLAR_LABELS[d.casa] || d.nombre}</span>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13.5, fontWeight: 700 }}>{fmtARS(d.venta)}</div>
+                  <div style={{ fontSize: 10.5, color: "#8a9698" }}>compra {fmtARS(d.compra)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>Crypto</div>
+          <button onClick={() => setMostrarAgregar((v) => !v)} style={{ ...btnOutline, padding: "5px 10px", fontSize: 11.5 }}>
+            {mostrarAgregar ? "Listo" : "+ Agregar"}
+          </button>
+        </div>
+
+        {mostrarAgregar && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+            {CRIPTOS_DISPONIBLES.map((c) => {
+              const active = trackeadas.includes(c.id);
+              return (
+                <button key={c.id} onClick={() => toggleCripto(c.id)} style={{
+                  padding: "5px 10px", borderRadius: 16, fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                  border: `1px solid ${active ? TEAL : "#ddd6c4"}`,
+                  background: active ? TEAL : "#fff", color: active ? "#fff" : INK,
+                }}>{c.symbol}</button>
+              );
+            })}
+          </div>
+        )}
+
+        {trackeadas.length === 0 ? (
+          <EmptyState text="No estás siguiendo ninguna cripto. Tocá + Agregar para elegir." />
+        ) : !cripto ? (
+          <div style={{ fontSize: 13, color: "#8a9698" }}>Cargando...</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            {trackeadas.map((id) => {
+              const info = CRIPTOS_DISPONIBLES.find((c) => c.id === id);
+              const precio = cripto[id]?.usd;
+              const variacion = cripto[id]?.usd_24h_change;
+              return (
+                <div key={id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #f2eee2" }}>
+                  <div>
+                    <div style={{ fontSize: 13.5, fontWeight: 600 }}>{info?.nombre || id}</div>
+                    <div style={{ fontSize: 10.5, color: "#8a9698" }}>{info?.symbol}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13.5, fontWeight: 700 }}>
+                      {precio != null ? `US$ ${precio.toLocaleString("es-AR", { maximumFractionDigits: precio < 1 ? 4 : 2 })}` : "—"}
+                    </div>
+                    {variacion != null && (
+                      <div style={{ fontSize: 10.5, fontWeight: 700, color: variacion >= 0 ? GREEN : BRICK }}>
+                        {variacion >= 0 ? "▲" : "▼"} {Math.abs(variacion).toFixed(1)}% (24h)
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div style={{ fontSize: 10.5, color: "#c4bda8", textAlign: "center" }}>
+        Fuente: DolarAPI.com y CoinGecko. Puede haber unos minutos de demora respecto al mercado real.
+      </div>
     </div>
   );
 }
