@@ -54,8 +54,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v88 · 2026-08-03 · nueva pestaña "Cotizaciones": dólar (oficial/blue/MEP/CCL/tarjeta/cripto) vía DolarAPI + crypto vía CoinGecko, con selector de monedas a trackear
-const APP_VERSION = "v88 · 2026-08-03";
+// v89 · 2026-08-03 · en desktop la navegación vuelve a ser inline debajo del balance (no fija abajo); panel de Divisas reorganizado en tarjetas
+const APP_VERSION = "v89 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1622,7 +1622,7 @@ export default function FinanzasApp() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: PAPER, fontFamily: "Inter, sans-serif", color: INK, paddingBottom: 150 }}>
+    <div style={{ minHeight: "100vh", background: PAPER, fontFamily: "Inter, sans-serif", color: INK, paddingBottom: isDesktop ? 100 : 150 }}>
       <style>{fontImports}</style>
       <style>{`
         * { box-sizing: border-box; }
@@ -1756,6 +1756,36 @@ export default function FinanzasApp() {
                 <Stat icon={<PiggyBank size={14} color={GOLD} />} label="Ahorrado" value={fmtARS(totalAhorro)} />
               </div>
             </div>
+
+            {/* En desktop, la navegación va acá, en el flujo normal de la
+                página — la barra fija de abajo (estilo app de celu) solo
+                tiene sentido en mobile, en una pantalla ancha se ve rara
+                pegada al fondo del navegador. */}
+            {isDesktop && (
+              <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 20 }}>
+                {PRIMARY_TABS.map(([key, label, Icon]) => {
+                  const active = tab === key;
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setTab(key)}
+                      style={{
+                        display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+                        width: 150, flexShrink: 0,
+                        padding: "14px 6px", borderRadius: 10, cursor: "pointer",
+                        border: `1.5px solid ${active ? TEAL : "#ddd6c4"}`,
+                        background: active ? TEAL : "#fff",
+                        color: active ? "#fff" : INK,
+                        boxShadow: active ? "0 4px 14px rgba(15,110,110,0.25)" : "0 1px 4px rgba(27,42,46,0.06)",
+                      }}
+                    >
+                      <Icon size={20} />
+                      <span style={{ fontSize: 11.5, fontWeight: 700, textAlign: "center", lineHeight: 1.1 }}>{label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </>
         )}
 
@@ -1938,7 +1968,8 @@ export default function FinanzasApp() {
         </div>
       )}
 
-      {/* Barra de navegación fija abajo, estilo apps bancarias */}
+      {/* Barra de navegación fija abajo — solo en mobile, estilo apps bancarias */}
+      {!isDesktop && (
       <div style={{
         position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 12,
         background: "#fff", borderTop: "1px solid #e6e0d0",
@@ -1965,6 +1996,7 @@ export default function FinanzasApp() {
           );
         })}
       </div>
+      )}
 
       {/* Menú de opciones del botón central, con fondo para cerrar tocando afuera */}
       {showAddMenu && (
@@ -2081,34 +2113,38 @@ function DivisasTab({ cambiosStats, cambios, onDelete }) {
   }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)", display: "flex", gap: 20, flexWrap: "wrap" }}>
-        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, width: "100%", marginBottom: 4 }}>Divisas</div>
-        <div>
-          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Último cambio</div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: TEAL, marginTop: 2 }}>
-            ${cambiosStats.ultimo.rate} <span style={{ fontSize: 11, color: "#9a9488", fontWeight: 400 }}>({cambiosStats.ultimo.date})</span>
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 14 }}>Divisas</div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 14 }}>
+          <div style={{ background: PAPER_DIM, borderRadius: 8, padding: "12px 14px" }}>
+            <div style={{ fontSize: 10.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Último cambio</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 19, fontWeight: 700, color: TEAL }}>${cambiosStats.ultimo.rate}</div>
+            <div style={{ fontSize: 10.5, color: "#9a9488", marginTop: 2 }}>{cambiosStats.ultimo.date}</div>
+          </div>
+          <div style={{ background: PAPER_DIM, borderRadius: 8, padding: "12px 14px" }}>
+            <div style={{ fontSize: 10.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Promedio histórico</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 19, fontWeight: 700 }}>${cambiosStats.promedio.toFixed(0)}</div>
+          </div>
+          <div style={{ background: PAPER_DIM, borderRadius: 8, padding: "12px 14px" }}>
+            <div style={{ fontSize: 10.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>USD cambiados en total</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 19, fontWeight: 700 }}>USD {cambiosStats.totalUsd.toLocaleString("es-AR")}</div>
           </div>
         </div>
-        <div>
-          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Promedio histórico</div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>${cambiosStats.promedio.toFixed(0)}</div>
+
+        <div style={{ fontSize: 11, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8, paddingTop: 4, borderTop: "1px solid #f0ece0" }}>
+          Por origen
         </div>
-        <div>
-          <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>USD cambiados en total</div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, marginTop: 2 }}>USD {cambiosStats.totalUsd.toLocaleString("es-AR")}</div>
-        </div>
-        <div style={{ width: "100%", display: "flex", gap: 20, flexWrap: "wrap", paddingTop: 12, marginTop: 4, borderTop: "1px solid #f0ece0" }}>
-          <div>
-            <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios ARQ (sueldo)</div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GREEN }}>
-              USD {cambiosStats.arq.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.arq.totalArs)}
-            </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+          <div style={{ border: `1.5px solid ${GREEN}`, borderRadius: 8, padding: "12px 14px" }}>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: GREEN, marginBottom: 6 }}>ARQ (sueldo)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 700 }}>USD {cambiosStats.arq.totalUsd.toLocaleString("es-AR")}</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: "#5a6b6d", marginTop: 2 }}>{fmtARS(cambiosStats.arq.totalArs)}</div>
           </div>
-          <div>
-            <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5 }}>Cambios externos (cueva/change)</div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, fontWeight: 600, marginTop: 2, color: GOLD }}>
-              USD {cambiosStats.externos.totalUsd.toLocaleString("es-AR")} · {fmtARS(cambiosStats.externos.totalArs)}
-            </div>
+          <div style={{ border: `1.5px solid ${GOLD}`, borderRadius: 8, padding: "12px 14px" }}>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: GOLD, marginBottom: 6 }}>Externos (cueva/change)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 700 }}>USD {cambiosStats.externos.totalUsd.toLocaleString("es-AR")}</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: "#5a6b6d", marginTop: 2 }}>{fmtARS(cambiosStats.externos.totalArs)}</div>
           </div>
         </div>
       </div>
