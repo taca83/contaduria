@@ -66,8 +66,8 @@ function clasificarMedioPago(cuenta) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v99 · 2026-08-03 · fecha con selector propio (Día/Mes con nombre/Año, sin ambigüedad de formato) + guardar un movimiento nuevo nunca más queda colgado en "Guardando..." sin avisar (timeout + error visible)
-const APP_VERSION = "v99 · 2026-08-03";
+// v100 · 2026-08-03 · cada movimiento registra cómo se cargó (manual/voz/foto/PDF/recurrente/acceso rápido/WhatsApp) y cuándo, visible al editar; Conciliar pagos ahora matchea también por N° de comprobante compartido
+const APP_VERSION = "v100 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -272,6 +272,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
             amount: monto,
             desc: `Pago de tarjeta ${cuenta} (SU PAGO EN PESOS)`,
             account: cuenta,
+            origen: "pdf_bbva",
             pagado: true, // esto ES el pago real — no es una deuda pendiente
           });
         }
@@ -308,6 +309,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       amount: monto,
       desc: seccionActual === "Natalia Wajsman" ? `${desc} (Natalia)` : desc,
       account: cuenta,
+      origen: "pdf_bbva",
     });
   });
 
@@ -351,6 +353,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
         amount: totalAPagar,
         desc: `Total a pagar — resumen ${cuenta}${vencMatch ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})` : ""}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
         account: cuenta,
+        origen: "pdf_bbva",
         pagado: false,
       });
       if (origenFecha !== "vencimiento") {
@@ -432,7 +435,7 @@ function parsearResumenMercadoPago(fullText, overrides = {}) {
       category = "Otros ingresos";
     }
 
-    filas.push({ date: fecha, type, category, amount: Math.abs(valor), desc, account: "Mercado Pago", who: titular || undefined });
+    filas.push({ date: fecha, type, category, amount: Math.abs(valor), desc, account: "Mercado Pago", who: titular || undefined, origen: "pdf_mercadopago" });
   }
   if (encontrados === 0) avisos.push("No encontré líneas con el formato esperado de Mercado Pago.");
   return { filas, avisos };
@@ -488,6 +491,7 @@ function parsearFacturaColegio(fullText, overrides = {}) {
     amount: monto,
     desc,
     account: "Colegio",
+    origen: "pdf_colegio",
     pagado: false, // los aranceles se suben antes de pagarlos, normalmente
   });
 
@@ -553,7 +557,7 @@ function extraerDatosDeTexto(texto, categories = []) {
     pagado = false;
   }
 
-  return { type, amount, category, date, desc: (texto || "").trim(), pagado };
+  return { type, amount, category, date, desc: (texto || "").trim(), pagado, origen: "voz" };
 }
 
 function monthKey(dateStr) {
@@ -564,6 +568,19 @@ function todayISO() {
 }
 
 const MESES_NOMBRE = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+const ORIGEN_LABELS = {
+  manual: "Carga manual",
+  voz: "Por voz",
+  foto: "Foto de recibo",
+  pdf_bbva: "Importado (PDF BBVA)",
+  pdf_mercadopago: "Importado (PDF Mercado Pago)",
+  pdf_colegio: "Importado (PDF Colegio)",
+  csv: "Importado (CSV/texto)",
+  recurrente: "Gasto recurrente automático",
+  acceso_rapido: "Acceso rápido",
+  whatsapp: "Por WhatsApp",
+};
 
 // Selector de fecha propio (Día / Mes con nombre / Año) — el input nativo
 // type="date" muestra el formato según el idioma del sistema operativo del
@@ -753,6 +770,8 @@ function entryFromDb(row) {
     account: row.account || "",
     who: row.who || "",
     persona: row.persona || "",
+    origen: row.origen || "manual",
+    createdAt: row.created_at || null,
     usdAmount: row.usd_amount != null ? Number(row.usd_amount) : undefined,
     rate: row.rate != null ? Number(row.rate) : undefined,
     moneda: row.moneda || "ARS",
@@ -773,6 +792,7 @@ function entryToDb(e) {
     account: e.account || "",
     who: e.who || "",
     persona: e.persona || e.who || "",
+    origen: e.origen || "manual",
     usd_amount: e.usdAmount != null ? Number(e.usdAmount) : null,
     rate: e.rate != null ? Number(e.rate) : null,
     moneda: e.moneda || "ARS",
@@ -1036,7 +1056,7 @@ export default function FinanzasApp() {
       nuevas.push({
         id: uid(), type: r.type, category: r.category, amount: Number(r.amount),
         desc: r.descripcion || "", date: fecha, account: r.account || "", moneda: r.moneda || "ARS",
-        who: nombre, recurringId: r.id, generatedMonth: mesActual,
+        who: nombre, recurringId: r.id, generatedMonth: mesActual, origen: "recurrente",
       });
     }
     if (nuevas.length === 0) return;
@@ -1555,6 +1575,7 @@ export default function FinanzasApp() {
       date: todayISO(),
       account: acceso.account || "",
       moneda: acceso.moneda || "ARS",
+      origen: "acceso_rapido",
     });
     setUltimoAccesoRegistrado({ id: entry.id, nombre: acceso.descripcion || acceso.category });
     setTimeout(() => {
@@ -2932,11 +2953,17 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
     if (!pasaTipo) return false;
     if (!buscando) return true;
     const q = busq.trim().toLowerCase();
+    const qNum = Number(busq.trim().replace(/\./g, "").replace(",", "."));
+    const matcheaMonto = !isNaN(qNum) && qNum > 0 && (
+      Math.abs(Number(e.amount) - qNum) < 0.01 || // monto exacto
+      String(Math.round(Number(e.amount))).includes(String(Math.round(qNum))) // "150" encuentra 150000, 21500, etc.
+    );
     return (
       e.desc?.toLowerCase().includes(q) ||
       e.category?.toLowerCase().includes(q) ||
       e.account?.toLowerCase().includes(q) ||
-      e.who?.toLowerCase().includes(q)
+      e.who?.toLowerCase().includes(q) ||
+      matcheaMonto
     );
   }).sort((a, b) => (usaTodo ? (b.date || "").localeCompare(a.date || "") : 0));
 
@@ -2960,7 +2987,7 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
       <input
         value={busq}
         onChange={(e) => setBusq(e.target.value)}
-        placeholder="Buscar por descripción, categoría, cuenta o quién lo cargó..."
+        placeholder="Buscar por descripción, categoría, cuenta, monto o quién lo cargó..."
         style={{ ...inputStyle, marginBottom: 10 }}
       />
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
@@ -3116,9 +3143,13 @@ function EditarMovimientoModal({ entry, categories, onClose, onSave, onDelete })
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: esPantallaAncha() ? "center" : "flex-end", justifyContent: "center", zIndex: 25 }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: esPantallaAncha() ? 480 : "100%", maxWidth: 480, borderRadius: esPantallaAncha() ? 16 : "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto", boxShadow: esPantallaAncha() ? "0 20px 60px rgba(27,42,46,0.3)" : "none" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>Editar movimiento</div>
           <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer" }} aria-label="Cerrar"><X size={22} /></button>
+        </div>
+        <div style={{ fontSize: 11, color: "#8a9698", marginBottom: 16 }}>
+          Cargado por <b>{entry.who || "—"}</b> · {ORIGEN_LABELS[entry.origen] || "Manual"}
+          {entry.createdAt && <> · {new Date(entry.createdAt).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}</>}
         </div>
 
         <label style={labelStyle}>Categoría</label>
@@ -3303,10 +3334,10 @@ function parseCSV(text) {
       const usdNum = Number((usd || "").replace(/[^0-9.-]/g, ""));
       const tcNum = Number((tc || "").replace(/[^0-9.-]/g, ""));
       if (!usdNum || usdNum <= 0) { errors.push(`Línea ${i + 1}: cambio necesita columna usd válida`); return; }
-      rows.push({ date: fecha, type: "cambio", category: "Cambio USD→ARS", amount: montoNum, desc: desc || "", account: cuenta || "", usdAmount: usdNum, rate: tcNum || Math.round(montoNum / usdNum) });
+      rows.push({ date: fecha, type: "cambio", category: "Cambio USD→ARS", amount: montoNum, desc: desc || "", account: cuenta || "", usdAmount: usdNum, rate: tcNum || Math.round(montoNum / usdNum), origen: "csv" });
       return;
     }
-    rows.push({ date: fecha, type: tipoNorm, category: categoria || "Otros", amount: montoNum, desc: desc || "", account: cuenta || "" });
+    rows.push({ date: fecha, type: tipoNorm, category: categoria || "Otros", amount: montoNum, desc: desc || "", account: cuenta || "", origen: "csv" });
   });
   return { rows, errors };
 }
@@ -3954,20 +3985,31 @@ function ConciliarPagosTab({ entries, onConfirmar }) {
     pendientes.forEach((p) => {
       pagados.forEach((pg) => {
         if (pg.id === p.id) return;
-        if (Math.abs(Number(p.amount) - Number(pg.amount)) > 0.5) return;
         const descP = (p.desc || p.category || "").toLowerCase().trim();
         const descPg = (pg.desc || pg.category || "").toLowerCase().trim();
         if (!descP || !descPg) return;
-        const coincide =
+
+        // Señal fuerte: comparten un número largo (factura/comprobante/
+        // "Doc.") — casi siempre significa que son el mismo movimiento,
+        // aunque el monto no coincida perfecto (redondeos, intereses).
+        const numerosP = descP.match(/\d{5,}/g) || [];
+        const numerosPg = descPg.match(/\d{5,}/g) || [];
+        const numeroComun = numerosP.find((n) => numerosPg.includes(n));
+
+        const montoCoincide = Math.abs(Number(p.amount) - Number(pg.amount)) <= 0.5;
+        const textoCoincide =
           descP.includes(descPg) || descPg.includes(descP) ||
           descP.split(/\s+/).some((w) => w.length > 3 && descPg.includes(w));
-        if (!coincide) return;
+
+        if (!numeroComun && !(montoCoincide && textoCoincide)) return;
+
         const clave = `${p.id}-${pg.id}`;
         if (descartadas.includes(clave)) return;
-        resultado.push({ clave, pendiente: p, pago: pg });
+        resultado.push({ clave, pendiente: p, pago: pg, numeroComun: numeroComun || null, montoCoincide });
       });
     });
-    return resultado;
+    // Las coincidencias por número de comprobante van primero — son las más confiables.
+    return resultado.sort((a, b) => (b.numeroComun ? 1 : 0) - (a.numeroComun ? 1 : 0));
   }, [entries, descartadas]);
 
   async function handleConfirmar(clave, pendienteId, pagoId) {
@@ -3979,15 +4021,22 @@ function ConciliarPagosTab({ entries, onConfirmar }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ fontSize: 13, color: "#8a9698" }}>
-        Compara automáticamente tus gastos marcados como "Pendiente" contra el resto de tus movimientos, buscando el mismo monto y una descripción parecida — típicamente una factura que cargaste por foto/PDF y después aparece pagada en un resumen bancario. Al confirmar, marca la factura como pagada y borra el duplicado del resumen, para no contar el gasto dos veces.
+        Compara automáticamente tus gastos marcados como "Pendiente" contra el resto de tus movimientos, buscando el mismo monto y una descripción parecida — o, más confiable todavía, el mismo número de factura/comprobante compartido. Al confirmar, marca la factura como pagada y borra el duplicado del resumen, para no contar el gasto dos veces.
       </div>
 
       {sugerencias.length === 0 ? (
         <EmptyState text="No hay coincidencias para revisar por ahora." />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {sugerencias.map(({ clave, pendiente, pago }) => (
+          {sugerencias.map(({ clave, pendiente, pago, numeroComun, montoCoincide }) => (
             <div key={clave} style={{ background: "#fff", borderRadius: 10, padding: 14, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+              {numeroComun ? (
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 700, color: GREEN, background: "#e8f3ec", padding: "3px 8px", borderRadius: 10, marginBottom: 8 }}>
+                  🔗 Mismo N° de comprobante ({numeroComun}){!montoCoincide ? " — monto distinto, revisá antes de confirmar" : ""}
+                </div>
+              ) : (
+                <div style={{ fontSize: 10.5, color: "#8a9698", marginBottom: 8 }}>Coincidencia por monto y descripción parecida</div>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "#fdf1de", borderRadius: 8 }}>
                   <div>
@@ -5363,6 +5412,7 @@ function FotoReciboModal({ onClose, onExtracted, categories }) {
         date: resultado.fecha || todayISO(),
         desc: detalle,
         pagado: resultado.pagado !== false,
+        origen: "foto",
       });
     } catch (e) {
       setError("No pude leer el recibo: " + e.message);
@@ -5567,16 +5617,17 @@ function EntryForm({ onClose, onSave, saving, saveError, categories, initialData
   }
 
   function handleSubmit() {
+    const origen = initialData?.origen || "manual";
     if (type === "cambio") {
       if (!usdAmount || Number(usdAmount) <= 0 || !rate || Number(rate) <= 0) return;
       onSave({
         type: "cambio", category: "Cambio USD→ARS", amount: arsFromCambio,
-        usdAmount: Number(usdAmount), rate: Number(rate), desc, date, account, persona
+        usdAmount: Number(usdAmount), rate: Number(rate), desc, date, account, persona, origen
       });
       return;
     }
     if (!montoCalculado || montoCalculado <= 0) return;
-    onSave({ type, amount: montoCalculado, category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS", pagado: type === "gasto" ? pagado : true, persona });
+    onSave({ type, amount: montoCalculado, category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS", pagado: type === "gasto" ? pagado : true, persona, origen });
   }
 
   return (
