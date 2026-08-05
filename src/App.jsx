@@ -7,7 +7,7 @@ import {
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
   ArrowUpRight, ArrowDownRight, ArrowLeft, ArrowLeftRight, Landmark, Settings, Trash2, User, Download, Menu,
-  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera, Clock
+  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera, Clock, Tag, Copy, History, LogOut
 } from "lucide-react";
 
 const DEFAULT_GASTO_CATS = ["Comida", "Tarjetas", "Ropa", "Salud", "Educación", "Transporte", "Ocio", "Servicios", "Vivienda", "Otros"];
@@ -54,8 +54,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v89 · 2026-08-03 · en desktop la navegación vuelve a ser inline debajo del balance (no fija abajo); panel de Divisas reorganizado en tarjetas
-const APP_VERSION = "v89 · 2026-08-03";
+// v92 · 2026-08-03 · nuevo botón "Exportar esta vista" en Movimientos: exporta solo lo filtrado/buscado, no todo el historial
+const APP_VERSION = "v92 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -706,6 +706,32 @@ function mockSaveNames(names) { safeSet("mock_names", names); }
 function mockSaveOverrides(overrides) { safeSet("mock_overrides", overrides); }
 function mockSaveRecurrentes(recurrentes) { safeSet("mock_recurrentes", recurrentes); }
 function mockSaveAccesosRapidos(accesos) { safeSet("mock_accesos_rapidos", accesos); }
+
+// Genera y descarga un Excel a partir de una lista de movimientos —
+// reutilizable tanto para "exportar todo" (header) como para "exportar
+// justo lo que está filtrado" (dentro de Movimientos).
+function exportarEntriesAExcel(lista, sufijoNombre = "movimientos") {
+  const filas = [...lista]
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+    .map((e) => ({
+      Fecha: e.date || "",
+      Tipo: e.type || "",
+      Categoría: e.category || "",
+      Monto: Number(e.amount) || 0,
+      Descripción: e.desc || "",
+      Cuenta: e.account || "",
+      Quién: e.who || "",
+      "USD (si es cambio)": e.usdAmount || "",
+      "Tipo de cambio (si es cambio)": e.rate || "",
+    }));
+  const ws = XLSX.utils.json_to_sheet(filas);
+  ws["!cols"] = [
+    { wch: 11 }, { wch: 10 }, { wch: 16 }, { wch: 13 }, { wch: 32 }, { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 16 },
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
+  XLSX.writeFile(wb, `finanzas_del_hogar_${sufijoNombre}_${todayISO()}.xlsx`);
+}
 
 export default function FinanzasApp() {
   const [loading, setLoading] = useState(true);
@@ -1382,27 +1408,9 @@ export default function FinanzasApp() {
     setUltimoAccesoRegistrado(null);
   }
 
+  // Wrapper liviano: el botón de Excel del header siempre exporta TODO.
   function exportarExcel() {
-    const filas = [...entries]
-      .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
-      .map((e) => ({
-        Fecha: e.date || "",
-        Tipo: e.type || "",
-        Categoría: e.category || "",
-        Monto: Number(e.amount) || 0,
-        Descripción: e.desc || "",
-        Cuenta: e.account || "",
-        Quién: e.who || "",
-        "USD (si es cambio)": e.usdAmount || "",
-        "Tipo de cambio (si es cambio)": e.rate || "",
-      }));
-    const ws = XLSX.utils.json_to_sheet(filas);
-    ws["!cols"] = [
-      { wch: 11 }, { wch: 10 }, { wch: 16 }, { wch: 13 }, { wch: 32 }, { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 16 },
-    ];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
-    XLSX.writeFile(wb, `finanzas_del_hogar_movimientos_${todayISO()}.xlsx`);
+    exportarEntriesAExcel(entries, "movimientos");
   }
 
   const now = new Date();
@@ -1622,7 +1630,7 @@ export default function FinanzasApp() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: PAPER, fontFamily: "Inter, sans-serif", color: INK, paddingBottom: isDesktop ? 100 : 150 }}>
+    <div style={{ minHeight: "100vh", background: PAPER, fontFamily: "Inter, sans-serif", color: INK, paddingBottom: isDesktop ? 100 : 150, marginLeft: isDesktop ? 230 : 0 }}>
       <style>{fontImports}</style>
       <style>{`
         * { box-sizing: border-box; }
@@ -1638,19 +1646,21 @@ export default function FinanzasApp() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", maxWidth: isDesktop ? 1080 : 720, margin: "0 auto" }}>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <button
-                onClick={() => setMenuOpen(true)}
-                aria-label="Abrir menú"
-                style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: PAPER, flexShrink: 0 }}
-              >
-                <Menu size={18} />
-              </button>
+              {!isDesktop && (
+                <button
+                  onClick={() => setMenuOpen(true)}
+                  aria-label="Abrir menú"
+                  style={{ background: "none", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: PAPER, flexShrink: 0 }}
+                >
+                  <Menu size={18} />
+                </button>
+              )}
               <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600 }}>Finanzas del hogar</div>
             </div>
-            <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2, marginLeft: 42 }}>
+            <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2, marginLeft: isDesktop ? 0 : 42 }}>
               Hola, {profileName}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, marginLeft: 42 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, marginLeft: isDesktop ? 0 : 42 }}>
               <button onClick={() => shiftMonth(-1)} aria-label="Mes anterior" style={{ background: "none", border: "none", cursor: "pointer", color: PAPER, opacity: 0.8, padding: 2 }}>◀</button>
               <span style={{ fontSize: 13, fontWeight: 700, textTransform: "capitalize", minWidth: 130, textAlign: "center" }}>{monthLabel(selectedMonth)}</span>
               <button onClick={() => shiftMonth(1)} aria-label="Mes siguiente" style={{ background: "none", border: "none", cursor: "pointer", color: PAPER, opacity: 0.8, padding: 2 }}>▶</button>
@@ -1660,9 +1670,9 @@ export default function FinanzasApp() {
                 </button>
               )}
             </div>
-            <div style={{ fontSize: 9.5, color: "#5f7376", marginTop: 6, marginLeft: 42 }}>{APP_VERSION}</div>
+            <div style={{ fontSize: 9.5, color: "#5f7376", marginTop: 6, marginLeft: isDesktop ? 0 : 42 }}>{APP_VERSION}</div>
             {!HAS_SUPABASE && (
-              <div style={{ fontSize: 10.5, color: GOLD, marginTop: 4, fontWeight: 700, marginLeft: 42 }}>
+              <div style={{ fontSize: 10.5, color: GOLD, marginTop: 4, fontWeight: 700, marginLeft: isDesktop ? 0 : 42 }}>
                 ⚠ Vista previa local — no conectado a Supabase
               </div>
             )}
@@ -1689,7 +1699,9 @@ export default function FinanzasApp() {
         </div>
       </div>
 
-      {/* Menú lateral (drawer) — se desliza desde la izquierda, con overlay oscuro atrás */}
+      {/* Menú lateral (drawer) — solo mobile. En desktop la navegación vive en la sidebar fija. */}
+      {!isDesktop && (
+      <>
       {menuOpen && (
         <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.45)", zIndex: 30 }} />
       )}
@@ -1726,6 +1738,82 @@ export default function FinanzasApp() {
           ))}
         </div>
       </div>
+      </>
+      )}
+
+      {/* Sidebar fija — solo desktop, estilo apps de escritorio (Mercado Pago, etc.) */}
+      {isDesktop && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, bottom: 0, width: 230,
+          background: "#fff", borderRight: "1px solid #e6e0d0", zIndex: 15,
+          display: "flex", flexDirection: "column", overflowY: "auto",
+        }}>
+          <div style={{ padding: "20px 18px", borderBottom: "1px solid #f0ece0" }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 18 }}>Finanzas del hogar</div>
+            <div style={{ fontSize: 11.5, color: "#8a9698", marginTop: 2 }}>Hola, {profileName}</div>
+          </div>
+          <div style={{ flex: 1, padding: "14px 10px", display: "flex", flexDirection: "column", gap: 18 }}>
+            {[
+              { label: null, items: PRIMARY_TABS },
+              { label: "Organización", items: [
+                ["categorias", TAB_LABELS.categorias, Tag],
+                ["presupuestos", TAB_LABELS.presupuestos, PiggyBank],
+                ["recurrentes", TAB_LABELS.recurrentes, Clock],
+                ["cuentas", TAB_LABELS.cuentas, Wallet],
+                ["personas", TAB_LABELS.personas, User],
+              ] },
+              { label: "Herramientas", items: [
+                ["recategorizar", TAB_LABELS.recategorizar, ArrowLeftRight],
+                ["conciliar", TAB_LABELS.conciliar, Check],
+                ["duplicados", TAB_LABELS.duplicados, Copy],
+                ["divisas", TAB_LABELS.divisas, Landmark],
+                ["cotizaciones", TAB_LABELS.cotizaciones, TrendingUp],
+              ] },
+              { label: "Hogar", items: [
+                ["hogar", TAB_LABELS.hogar, Settings],
+                ["historial", TAB_LABELS.historial, History],
+                ["ahorros", TAB_LABELS.ahorros, PiggyBank],
+              ] },
+              { label: "Sistema", items: [
+                ["reset", TAB_LABELS.reset, Trash2],
+                ...(esAdmin ? [["admin", TAB_LABELS.admin, Target]] : []),
+              ] },
+            ].map((grupo, gi) => (
+              <div key={gi}>
+                {grupo.label && (
+                  <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", padding: "0 10px", marginBottom: 6 }}>
+                    {grupo.label}
+                  </div>
+                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  {grupo.items.map(([key, label, Icon]) => {
+                    const active = tab === key;
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setTab(key)}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 8,
+                          border: "none", background: active ? TEAL : "transparent", color: active ? "#fff" : INK,
+                          cursor: "pointer", fontSize: 13.5, fontWeight: active ? 700 : 500, textAlign: "left",
+                        }}
+                      >
+                        <Icon size={17} />
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ padding: "14px 18px", borderTop: "1px solid #f0ece0" }}>
+            <button onClick={handleLogout} style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", cursor: "pointer", color: BRICK, fontSize: 13, padding: 0 }}>
+              <LogOut size={16} /> Cerrar sesión
+            </button>
+          </div>
+        </div>
+      )}
 
       <div style={{ maxWidth: isDesktop ? 1080 : 720, margin: "0 auto", padding: "0 16px" }}>
         {menuTabs.includes(tab) ? (
@@ -1741,9 +1829,43 @@ export default function FinanzasApp() {
           </div>
         ) : (
           <>
+            {/* Barra de accesos (desktop): navegación + acciones rápidas, arriba del balance */}
+            {isDesktop && (
+              <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 18, marginBottom: 18, flexWrap: "wrap" }}>
+                {[
+                  ["resumen", "Resumen", Home, () => setTab("resumen")],
+                  ["movimientos", "Movimientos", List, () => setTab("movimientos")],
+                  ["rapidos", "Gastos rápidos", Zap, () => setTab("rapidos")],
+                  ["manual", "Ingreso manual", Pencil, () => setShowForm(true)],
+                  ["imagen", "Imagen", Camera, () => setShowFoto(true)],
+                  ["importar", "Importar", Upload, () => setTab("importar")],
+                ].map(([key, label, Icon, accion]) => {
+                  const active = tab === key;
+                  return (
+                    <button
+                      key={key}
+                      onClick={accion}
+                      style={{
+                        display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+                        width: 128, flexShrink: 0,
+                        padding: "12px 6px", borderRadius: 10, cursor: "pointer",
+                        border: `1.5px solid ${active ? TEAL : "#ddd6c4"}`,
+                        background: active ? TEAL : "#fff",
+                        color: active ? "#fff" : INK,
+                        boxShadow: active ? "0 4px 14px rgba(15,110,110,0.25)" : "0 1px 4px rgba(27,42,46,0.06)",
+                      }}
+                    >
+                      <Icon size={19} />
+                      <span style={{ fontSize: 11, fontWeight: 700, textAlign: "center", lineHeight: 1.1 }}>{label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
             {/* Balance ticket */}
             <div style={{
-              background: "#fff", marginTop: -18, borderRadius: 10, padding: "20px 18px",
+              background: "#fff", marginTop: isDesktop ? 0 : -18, borderRadius: 10, padding: "20px 18px",
               boxShadow: "0 8px 24px rgba(27,42,46,0.12)", position: "relative"
             }}>
               <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#8a9698", marginBottom: 4 }}>Balance del mes</div>
@@ -1756,36 +1878,6 @@ export default function FinanzasApp() {
                 <Stat icon={<PiggyBank size={14} color={GOLD} />} label="Ahorrado" value={fmtARS(totalAhorro)} />
               </div>
             </div>
-
-            {/* En desktop, la navegación va acá, en el flujo normal de la
-                página — la barra fija de abajo (estilo app de celu) solo
-                tiene sentido en mobile, en una pantalla ancha se ve rara
-                pegada al fondo del navegador. */}
-            {isDesktop && (
-              <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 20 }}>
-                {PRIMARY_TABS.map(([key, label, Icon]) => {
-                  const active = tab === key;
-                  return (
-                    <button
-                      key={key}
-                      onClick={() => setTab(key)}
-                      style={{
-                        display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-                        width: 150, flexShrink: 0,
-                        padding: "14px 6px", borderRadius: 10, cursor: "pointer",
-                        border: `1.5px solid ${active ? TEAL : "#ddd6c4"}`,
-                        background: active ? TEAL : "#fff",
-                        color: active ? "#fff" : INK,
-                        boxShadow: active ? "0 4px 14px rgba(15,110,110,0.25)" : "0 1px 4px rgba(27,42,46,0.06)",
-                      }}
-                    >
-                      <Icon size={20} />
-                      <span style={{ fontSize: 11.5, fontWeight: 700, textAlign: "center", lineHeight: 1.1 }}>{label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
           </>
         )}
 
@@ -1998,7 +2090,11 @@ export default function FinanzasApp() {
       </div>
       )}
 
-      {/* Menú de opciones del botón central, con fondo para cerrar tocando afuera */}
+      {/* Menú de opciones del botón central + el botón en sí: solo mobile.
+          En desktop, "Ingreso manual" e "Imagen" ya están en la barra de
+          arriba, y "Por voz" no aplica tanto en escritorio. */}
+      {!isDesktop && (
+        <>
       {showAddMenu && (
         <div onClick={() => setShowAddMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 13 }} />
       )}
@@ -2047,6 +2143,8 @@ export default function FinanzasApp() {
       >
         <Plus size={28} />
       </button>
+        </>
+      )}
 
       {showFoto && (
         <FotoReciboModal
@@ -2629,8 +2727,18 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
   return (
     <div>
       {monthLabel && (
-        <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 10, textTransform: "capitalize" }}>
-          {usaTodo ? <>Mostrando <b>todo el historial</b></> : <>Mostrando: <b>{monthLabel}</b></>}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 12, color: "#8a9698", textTransform: "capitalize" }}>
+            {usaTodo ? <>Mostrando <b>todo el historial</b></> : <>Mostrando: <b>{monthLabel}</b></>}
+          </div>
+          <button
+            onClick={() => exportarEntriesAExcel(filtered, "filtrados")}
+            disabled={filtered.length === 0}
+            title="Exporta solo lo que ves ahora (con la búsqueda/filtro aplicado)"
+            style={{ ...btnOutline, padding: "5px 10px", fontSize: 11.5, opacity: filtered.length === 0 ? 0.5 : 1 }}
+          >
+            <Download size={13} /> Exportar esta vista ({filtered.length})
+          </button>
         </div>
       )}
       <input
