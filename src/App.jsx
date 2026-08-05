@@ -54,8 +54,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v92 · 2026-08-03 · nuevo botón "Exportar esta vista" en Movimientos: exporta solo lo filtrado/buscado, no todo el historial
-const APP_VERSION = "v92 · 2026-08-03";
+// v94 · 2026-08-03 · modo edición de Movimientos rediseñado: modal completo (categoría, descripción, monto, fecha, cuenta, pagado, borrar) en vez de edición apretada dentro de la fila
+const APP_VERSION = "v94 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1144,6 +1144,28 @@ export default function FinanzasApp() {
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ amount: nuevoMonto }) });
   }
 
+  // Edición completa de un movimiento (categoría, descripción, monto,
+  // fecha, cuenta, pagado) en un solo viaje a la base — usada por el
+  // modal de edición de Movimientos.
+  async function editEntryFull(id, cambios) {
+    const anterior = entries.find((e) => e.id === id);
+    setEntries((prev) => {
+      const next = prev.map((e) => e.id === id ? { ...e, ...cambios } : e);
+      if (!HAS_SUPABASE) mockSaveEntries(next);
+      return next;
+    });
+    await logAudit("edit_completo", anterior, anterior, cambios);
+    if (!HAS_SUPABASE) return;
+    const body = {};
+    if (cambios.category !== undefined) body.category = cambios.category;
+    if (cambios.desc !== undefined) body.descripcion = cambios.desc;
+    if (cambios.amount !== undefined) body.amount = Number(cambios.amount);
+    if (cambios.date !== undefined) body.date = cambios.date;
+    if (cambios.account !== undefined) body.account = cambios.account;
+    if (cambios.pagado !== undefined) body.pagado = cambios.pagado;
+    await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
+  }
+
   async function toggleEntryPagado(id, nuevoValor) {
     const anterior = entries.find((e) => e.id === id);
     setEntries((prev) => {
@@ -1358,6 +1380,25 @@ export default function FinanzasApp() {
       return { ok: true, miembros: rows };
     } catch (e) {
       return { error: e.message || "No se pudo renombrar." };
+    }
+  }
+
+  // Unifica/renombra una cuenta (ej. "Visa Signature" y "Visa BBVA Hernán"
+  // son la misma tarjeta) — arrastra el cambio a TODOS los movimientos
+  // viejos (de cualquier mes) que tenían el nombre anterior guardado.
+  async function renombrarCuenta(nombreViejo, nombreNuevo) {
+    const limpio = (nombreNuevo || "").trim();
+    if (!limpio) return { error: "Poné un nombre." };
+    if (limpio === nombreViejo) return { ok: true };
+    if (!HAS_SUPABASE) return { error: "No aplica en vista previa local." };
+    try {
+      await sb(`entries?household_id=eq.${householdId}&account=eq.${encodeURIComponent(nombreViejo)}`, {
+        method: "PATCH", body: JSON.stringify({ account: limpio }),
+      });
+      await refrescarEntries();
+      return { ok: true };
+    } catch (e) {
+      return { error: e.message || "No se pudo renombrar la cuenta." };
     }
   }
 
@@ -1896,7 +1937,7 @@ export default function FinanzasApp() {
             />
           )}
           {tab === "movimientos" && (
-            <MovimientosTab allEntries={entries} entries={thisMonthEntries} onDelete={deleteEntry} onEditDesc={editEntryDesc} onEditAmount={editEntryAmount} onTogglePagado={toggleEntryPagado} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
+            <MovimientosTab allEntries={entries} entries={thisMonthEntries} categories={categories} onDelete={deleteEntry} onEditDesc={editEntryDesc} onEditAmount={editEntryAmount} onEditFull={editEntryFull} onTogglePagado={toggleEntryPagado} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
           )}
           {tab === "ahorros" && (
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
@@ -1994,7 +2035,7 @@ export default function FinanzasApp() {
               onDelete={deleteAccesoRapido}
             />
           )}
-          {tab === "cuentas" && <CuentasTab thisMonthEntries={thisMonthEntries} monthLabel={monthLabel(selectedMonth)} />}
+          {tab === "cuentas" && <CuentasTab thisMonthEntries={thisMonthEntries} monthLabel={monthLabel(selectedMonth)} onRenombrarCuenta={renombrarCuenta} />}
           {tab === "cotizaciones" && <CotizacionesTab />}
           {tab === "personas" && <PersonasTab thisMonthEntries={thisMonthEntries} monthLabel={monthLabel(selectedMonth)} />}
           {tab === "conciliar" && <ConciliarPagosTab entries={entries} onConfirmar={confirmarConciliacion} />}
@@ -2678,33 +2719,11 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   );
 }
 
-function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmount, onTogglePagado, profileName, monthLabel }) {
+function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc, onEditAmount, onEditFull, onTogglePagado, profileName, monthLabel }) {
   const [filter, setFilter] = useState("todos");
   const [busq, setBusq] = useState("");
   const [alcance, setAlcance] = useState("mes"); // "mes" | "historial"
   const [editingId, setEditingId] = useState(null);
-  const [editText, setEditText] = useState("");
-  const [editAmount, setEditAmount] = useState("");
-
-  function startEdit(e) {
-    setEditingId(e.id);
-    setEditText(e.desc || "");
-    setEditAmount(String(e.amount ?? ""));
-  }
-  function cancelEdit() {
-    setEditingId(null);
-    setEditText("");
-    setEditAmount("");
-  }
-  async function saveEdit(e) {
-    const nuevoTexto = editText.trim();
-    const nuevoMonto = Number(editAmount);
-    if (nuevoTexto !== (e.desc || "")) await onEditDesc(e.id, nuevoTexto);
-    if (nuevoMonto > 0 && nuevoMonto !== Number(e.amount)) await onEditAmount(e.id, nuevoMonto);
-    setEditingId(null);
-    setEditText("");
-    setEditAmount("");
-  }
   const buscando = busq.trim().length > 0;
   const usaTodo = alcance === "historial";
 
@@ -2809,7 +2828,6 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
       {filtered.length === 0 ? <EmptyState text="No hay movimientos para mostrar." /> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {filtered.map((e) => {
-            const editing = editingId === e.id;
             return (
               <div key={e.id} style={{ background: "#fff", borderRadius: 8, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: "0 1px 4px rgba(27,42,46,0.06)", gap: 10 }}>
                 <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0, flex: 1 }}>
@@ -2821,55 +2839,26 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
                     {e.type === "ingreso" ? <TrendingUp size={16} color={GREEN} /> : e.type === "cambio" ? <Landmark size={16} color={TEAL} /> : <TrendingDown size={16} color={BRICK} />}
                   </div>
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    {editing ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                          <input
-                            autoFocus
-                            value={editText}
-                            onChange={(ev) => setEditText(ev.target.value)}
-                            onKeyDown={(ev) => { if (ev.key === "Enter") saveEdit(e); if (ev.key === "Escape") cancelEdit(); }}
-                            placeholder="Descripción"
-                            style={{ ...inputStyle, padding: "5px 8px", fontSize: 13, flex: 1 }}
-                          />
-                          <input
-                            type="number"
-                            value={editAmount}
-                            onChange={(ev) => setEditAmount(ev.target.value)}
-                            onKeyDown={(ev) => { if (ev.key === "Enter") saveEdit(e); if (ev.key === "Escape") cancelEdit(); }}
-                            placeholder="Monto"
-                            style={{ ...inputStyle, padding: "5px 8px", fontSize: 13, width: 110, fontFamily: "'IBM Plex Mono', monospace" }}
-                          />
-                          <button onClick={() => saveEdit(e)} style={{ border: "none", background: "none", cursor: "pointer", color: GREEN, flexShrink: 0 }} aria-label="Guardar">
-                            <Check size={16} />
-                          </button>
-                          <button onClick={cancelEdit} style={{ border: "none", background: "none", cursor: "pointer", color: "#b8b2a4", flexShrink: 0 }} aria-label="Cancelar">
-                            <X size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.category}{e.desc ? ` · ${e.desc}` : ""}</div>
-                        {e.type !== "cambio" && (
-                          <button onClick={() => startEdit(e)} style={{ border: "none", background: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }} aria-label="Editar descripción y monto">
-                            <Pencil size={13} />
-                          </button>
-                        )}
-                        {e.type === "gasto" && e.pagado === false && (
-                          <button
-                            onClick={() => onTogglePagado(e.id, true)}
-                            title="Tocá para marcar como pagado"
-                            style={{
-                              fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 10,
-                              background: "#fdf1de", color: GOLD, border: `1px solid ${GOLD}`, cursor: "pointer", flexShrink: 0,
-                            }}
-                          >
-                            Pendiente
-                          </button>
-                        )}
-                      </div>
-                    )}
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.category}{e.desc ? ` · ${e.desc}` : ""}</div>
+                      {e.type !== "cambio" && (
+                        <button onClick={() => setEditingId(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }} aria-label="Editar movimiento">
+                          <Pencil size={13} />
+                        </button>
+                      )}
+                      {e.type === "gasto" && e.pagado === false && (
+                        <button
+                          onClick={() => onTogglePagado(e.id, true)}
+                          title="Tocá para marcar como pagado"
+                          style={{
+                            fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 10,
+                            background: "#fdf1de", color: GOLD, border: `1px solid ${GOLD}`, cursor: "pointer", flexShrink: 0,
+                          }}
+                        >
+                          Pendiente
+                        </button>
+                      )}
+                    </div>
                     <div style={{ fontSize: 11.5, color: "#9a9488" }}>
                       {e.date} · {e.who}{e.account ? ` · ${e.account}` : ""}{e.type === "cambio" ? ` · USD ${e.usdAmount} a $${e.rate}` : ""}
                     </div>
@@ -2888,6 +2877,106 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
           })}
         </div>
       )}
+
+      {editingId && (() => {
+        const entryEditando = filtered.find((en) => en.id === editingId) || allEntries.find((en) => en.id === editingId);
+        if (!entryEditando) return null;
+        return (
+          <EditarMovimientoModal
+            entry={entryEditando}
+            categories={categories}
+            onClose={() => setEditingId(null)}
+            onSave={async (cambios) => { await onEditFull(entryEditando.id, cambios); setEditingId(null); }}
+            onDelete={() => { onDelete(entryEditando.id); setEditingId(null); }}
+          />
+        );
+      })()}
+    </div>
+  );
+}
+
+function EditarMovimientoModal({ entry, categories, onClose, onSave, onDelete }) {
+  const [category, setCategory] = useState(entry.category || (categories?.[0] || ""));
+  const [desc, setDesc] = useState(entry.desc || "");
+  const [amount, setAmount] = useState(String(entry.amount ?? ""));
+  const [date, setDate] = useState(entry.date || todayISO());
+  const [account, setAccount] = useState(entry.account || "");
+  const [pagado, setPagado] = useState(entry.pagado !== false);
+  const [guardando, setGuardando] = useState(false);
+  const [confirmarBorrado, setConfirmarBorrado] = useState(false);
+
+  async function handleGuardar() {
+    const montoNum = Number(amount);
+    if (!montoNum || montoNum <= 0) return;
+    setGuardando(true);
+    await onSave({
+      category, desc: desc.trim(), amount: montoNum, date, account: account.trim(),
+      ...(entry.type === "gasto" ? { pagado } : {}),
+    });
+    setGuardando(false);
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 25 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: "100%", maxWidth: 480, borderRadius: "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>Editar movimiento</div>
+          <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer" }} aria-label="Cerrar"><X size={22} /></button>
+        </div>
+
+        <label style={labelStyle}>Categoría</label>
+        <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }}>
+          {(categories || []).includes(category) ? null : <option value={category}>{category}</option>}
+          {(categories || []).map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+
+        <label style={labelStyle}>Descripción</label>
+        <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Descripción (opcional)" style={{ ...inputStyle, marginBottom: 14 }} />
+
+        <label style={labelStyle}>Monto</label>
+        <input
+          type="number"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          style={{ ...inputStyle, marginBottom: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 18 }}
+        />
+
+        <label style={labelStyle}>Fecha</label>
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }} />
+
+        <label style={labelStyle}>Cuenta (opcional)</label>
+        <input value={account} onChange={(e) => setAccount(e.target.value)} placeholder="Ej: Visa BBVA, Efectivo..." style={{ ...inputStyle, marginBottom: 14 }} />
+
+        {entry.type === "gasto" && (
+          <>
+            <label style={labelStyle}>Estado</label>
+            <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
+              {[[true, "Pagado", GREEN], [false, "Pendiente de pago", GOLD]].map(([val, label, color]) => (
+                <button key={String(val)} onClick={() => setPagado(val)} style={{
+                  flex: 1, padding: "8px 6px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                  border: `1.5px solid ${pagado === val ? color : "#ddd6c4"}`,
+                  background: pagado === val ? color : "#fff", color: pagado === val ? "#fff" : INK,
+                }}>{label}</button>
+              ))}
+            </div>
+          </>
+        )}
+
+        <button onClick={handleGuardar} disabled={guardando} style={{ ...btnPrimary, width: "100%", justifyContent: "center", padding: "13px", marginBottom: 10 }}>
+          {guardando ? "Guardando..." : "Guardar cambios"}
+        </button>
+
+        {!confirmarBorrado ? (
+          <button onClick={() => setConfirmarBorrado(true)} style={{ ...btnOutline, width: "100%", justifyContent: "center", color: BRICK, borderColor: BRICK }}>
+            <Trash2 size={15} /> Borrar este movimiento
+          </button>
+        ) : (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onDelete} style={{ ...btnPrimary, background: BRICK, flex: 1, justifyContent: "center" }}>Sí, borrar</button>
+            <button onClick={() => setConfirmarBorrado(false)} style={{ ...btnOutline, flex: 1, justifyContent: "center" }}>Cancelar</button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -3895,8 +3984,21 @@ function CotizacionesTab() {
   );
 }
 
-function CuentasTab({ thisMonthEntries, monthLabel }) {
+function CuentasTab({ thisMonthEntries, monthLabel, onRenombrarCuenta }) {
   const [expandedCuenta, setExpandedCuenta] = useState(null);
+  const [editandoCuentaDe, setEditandoCuentaDe] = useState(null);
+  const [nombreCuentaNuevo, setNombreCuentaNuevo] = useState("");
+  const [renombrandoCuenta, setRenombrandoCuenta] = useState(false);
+  const [errorRenombrarCuenta, setErrorRenombrarCuenta] = useState(null);
+
+  async function handleRenombrarCuenta(nombreViejo) {
+    setErrorRenombrarCuenta(null);
+    setRenombrandoCuenta(true);
+    const res = await onRenombrarCuenta(nombreViejo, nombreCuentaNuevo);
+    setRenombrandoCuenta(false);
+    if (res?.error) { setErrorRenombrarCuenta(res.error); return; }
+    setEditandoCuentaDe(null);
+  }
 
   const gastosPorCuenta = useMemo(() => {
     const map = {};
@@ -3923,7 +4025,7 @@ function CuentasTab({ thisMonthEntries, monthLabel }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ fontSize: 12.5, color: "#8a9698" }}>
-        Gastos e ingresos de {monthLabel}, agrupados por tarjeta/cuenta/efectivo — usa el campo "Cuenta" que ya cargás en cada movimiento (Visa BBVA, Mastercard Black, ARQ, Mercado Pago, Efectivo, etc.), así que si tenés más de una tarjeta, cada una aparece por separado.
+        Gastos e ingresos de {monthLabel}, agrupados por tarjeta/cuenta/efectivo — usa el campo "Cuenta" que ya cargás en cada movimiento (Visa BBVA, Mastercard Black, ARQ, Mercado Pago, Efectivo, etc.), así que si tenés más de una tarjeta, cada una aparece por separado. Si dos nombres son en realidad la misma tarjeta (ej. "Visa Signature" y "Visa BBVA Hernán"), tocá el lápiz al lado del nombre para unificarlas.
       </div>
 
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
@@ -3950,14 +4052,46 @@ function CuentasTab({ thisMonthEntries, monthLabel }) {
                   : [];
                 return (
                   <div key={c.name}>
-                    <div
-                      onClick={() => setExpandedCuenta(isOpen ? null : `gasto-${c.name}`)}
-                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", cursor: "pointer" }}
-                    >
-                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: CAT_COLORS[i % CAT_COLORS.length], flexShrink: 0 }} />
-                      <div style={{ flex: 1, fontSize: 13 }}>{c.name}</div>
-                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 }}>{fmtARS(c.value)}</div>
-                    </div>
+                    {editandoCuentaDe === c.name ? (
+                      <div style={{ padding: "6px 0" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <input
+                            value={nombreCuentaNuevo}
+                            onChange={(e) => setNombreCuentaNuevo(e.target.value)}
+                            autoFocus
+                            style={{ ...inputStyle, flex: 1, padding: "6px 8px", fontSize: 13 }}
+                            onKeyDown={(e) => { if (e.key === "Enter") handleRenombrarCuenta(c.name); if (e.key === "Escape") setEditandoCuentaDe(null); }}
+                          />
+                          <button onClick={() => handleRenombrarCuenta(c.name)} disabled={renombrandoCuenta} aria-label="Confirmar" style={{ background: "none", border: "none", cursor: "pointer", color: GREEN }}>
+                            <Check size={17} />
+                          </button>
+                          <button onClick={() => setEditandoCuentaDe(null)} aria-label="Cancelar" style={{ background: "none", border: "none", cursor: "pointer", color: "#8a9698" }}>
+                            <X size={17} />
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 11, color: "#8a9698", marginTop: 4 }}>
+                          Va a renombrar TODOS los movimientos viejos de "{c.name}" (de cualquier mes) — útil si en realidad es la misma tarjeta que otra cuenta.
+                        </div>
+                        {errorRenombrarCuenta && <div style={{ color: BRICK, fontSize: 11.5, marginTop: 4 }}>{errorRenombrarCuenta}</div>}
+                      </div>
+                    ) : (
+                      <div
+                        style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}
+                      >
+                        <div onClick={() => setExpandedCuenta(isOpen ? null : `gasto-${c.name}`)} style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer", minWidth: 0 }}>
+                          <div style={{ width: 10, height: 10, borderRadius: "50%", background: CAT_COLORS[i % CAT_COLORS.length], flexShrink: 0 }} />
+                          <div style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 }}>{fmtARS(c.value)}</div>
+                        </div>
+                        <button
+                          onClick={() => { setEditandoCuentaDe(c.name); setNombreCuentaNuevo(c.name); setErrorRenombrarCuenta(null); }}
+                          aria-label="Renombrar/unificar cuenta"
+                          style={{ background: "none", border: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                      </div>
+                    )}
                     {isOpen && (
                       <div style={{ marginLeft: 18, marginBottom: 6, display: "flex", flexDirection: "column", gap: 3 }}>
                         {movs.map((m) => (
