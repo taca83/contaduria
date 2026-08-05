@@ -349,6 +349,7 @@ serve(async (req) => {
           date: new Date().toISOString().slice(0, 10),
           who: link.display_name,
           moneda: "ARS",
+          origen: "whatsapp",
         }]),
       });
       const signo = resultado.entry.type === "gasto" ? "Gasto" : "Ingreso";

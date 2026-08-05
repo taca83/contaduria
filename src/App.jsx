@@ -66,8 +66,8 @@ function clasificarMedioPago(cuenta) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v101 · 2026-08-03 · login: "¿Olvidaste tu contraseña?" (mail de recuperación + pantalla para elegir una nueva) y ojito para mostrar/ocultar la contraseña
-const APP_VERSION = "v101 · 2026-08-03";
+// v102 · 2026-08-03 · fix crítico BBVA: "Total a pagar" usa Saldo Actual (no Pago Mínimo/débito automático, que puede ser parcial); parser de consumos reescrito para no perder filas partidas por el lector de PDF; cuotas usan la fecha del ciclo actual + muestran cuántas quedan
+const APP_VERSION = "v102 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -248,10 +248,23 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   const cuentaMatch = lineas.find((l) => /Visa Signature|Mastercard Black/i.test(l));
   const cuenta = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
 
+  // Fecha de cierre del ciclo actual — la usamos para las cuotas (ver más
+  // abajo) y como respaldo de fecha del "Total a pagar".
+  const textoCompletoTmp = lineas.join("\n");
+  const cierreMatchTmp = textoCompletoTmp.match(/CIERRE ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+  const fechaCierre = cierreMatchTmp ? fechaBbvaAIso(cierreMatchTmp[1], cierreMatchTmp[2], cierreMatchTmp[3]) : null;
+
   let seccionActual = null; // "Hernan Israel" | "Natalia Wajsman" | null
   let enSeccionPagos = false;
-  const LINEA_MOV = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+(.+?)\s+(\d{6})\s+(-?[\d.,]+)\s*$/;
   const LINEA_PAGO = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+SU PAGO EN PESOS\s+(-?[\d.,]+)\s*$/i;
+  // Un movimiento completo: fecha, descripción, cupón de 6 dígitos, monto.
+  // Se corre sobre el BLOQUE entero de la sección (no línea por línea),
+  // porque a veces el lector de PDF separa la marca de cuota "C.XX/YY" en
+  // una línea aparte por una diferencia mínima de posición vertical —
+  // uniendo todo el bloque, eso ya no importa.
+  const BLOQUE_MOV = /(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+(.+?)\s+(\d{6})\s+(-?[\d.,]+,\d{2})(?=\s+\d{2}-[A-Za-zÁÉÍÓÚáéíóú]{3}-\d{2}\s|\s*$)/g;
+
+  const bloquePorSeccion = { "Hernan Israel": [], "Natalia Wajsman": [] };
 
   lineas.forEach((linea) => {
     if (/^Sus pagos y ajustes realizados/i.test(linea)) { enSeccionPagos = true; return; }
@@ -294,23 +307,46 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       // igual que venimos haciendo a mano, porque no es deuda en pesos.
       return;
     }
-    const m = linea.match(LINEA_MOV);
-    if (!m) return;
-    const [, dd, mmm, yy, descRaw, , montoRaw] = m;
-    const fecha = fechaBbvaAIso(dd, mmm, yy);
-    if (!fecha) { avisos.push(`No pude leer la fecha en: "${linea}"`); return; }
-    const monto = Number(montoRaw.replace(/\./g, "").replace(",", "."));
-    if (!monto) return;
-    const desc = descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, (s) => ` (cuota${s.trim().replace("C.", " ")})`).trim();
-    filas.push({
-      date: fecha,
-      type: "gasto",
-      category: inferCategory(desc, overrides),
-      amount: monto,
-      desc: seccionActual === "Natalia Wajsman" ? `${desc} (Natalia)` : desc,
-      account: cuenta,
-      origen: "pdf_bbva",
-    });
+    bloquePorSeccion[seccionActual].push(linea);
+  });
+
+  Object.entries(bloquePorSeccion).forEach(([persona, lineasSeccion]) => {
+    if (lineasSeccion.length === 0) return;
+    const texto = lineasSeccion.join(" ").replace(/\s+/g, " ");
+    let m;
+    while ((m = BLOQUE_MOV.exec(texto))) {
+      const [, dd, mmm, yy, descRaw, , montoRaw] = m;
+      const fecha = fechaBbvaAIso(dd, mmm, yy);
+      if (!fecha) { avisos.push(`No pude leer la fecha en: "${m[0]}"`); continue; }
+      const monto = Number(montoRaw.replace(/\./g, "").replace(",", "."));
+      if (!monto) continue;
+
+      const cuotaMatch = descRaw.match(/\s*C\.(\d{2})\/(\d{2})\s*$/);
+      let desc = descRaw.trim();
+      let fechaFinal = fecha;
+      if (cuotaMatch) {
+        const actual = Number(cuotaMatch[1]);
+        const total = Number(cuotaMatch[2]);
+        const quedan = total - actual;
+        desc = descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, "").trim();
+        desc += ` (cuota ${actual}/${total}${quedan > 0 ? ` — quedan ${quedan}` : " — última"})`;
+        // La fecha que trae el PDF en una cuota es la de la COMPRA
+        // original, no la de este cobro — para que el gasto caiga en el
+        // mes correcto (el de este resumen), usamos la fecha de cierre
+        // del ciclo actual en vez de esa fecha vieja.
+        if (fechaCierre) fechaFinal = fechaCierre;
+      }
+
+      filas.push({
+        date: fechaFinal,
+        type: "gasto",
+        category: inferCategory(desc, overrides),
+        amount: monto,
+        desc: persona === "Natalia Wajsman" ? `${desc} (Natalia)` : desc,
+        account: cuenta,
+        origen: "pdf_bbva",
+      });
+    }
   });
 
   // Además de los consumos, agregamos el "Total a pagar" del resumen en sí
@@ -318,7 +354,14 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   // como Pendiente, y se marca Pagado más adelante (a mano, o vía
   // Conciliar pagos cuando aparezca el pago real en otro resumen).
   const textoCompleto = lineas.join("\n");
-  const totalMatch = textoCompleto.match(/LA SUMA DE\s*\$\s*([\d.]+,\d{2})/i);
+  // El monto correcto es SIEMPRE "SALDO ACTUAL $" (la deuda total real de
+  // la tarjeta) — la línea "...LA SUMA DE $" del final del resumen NO
+  // sirve como fuente principal: si la cuenta tiene un plan de cuotas
+  // (ej. "Plan V"), esa línea puede reflejar solo el PAGO MÍNIMO que se
+  // debita automático, no el total adeudado. Esto ya causó un bug real.
+  const totalMatch =
+    textoCompleto.match(/SALDO ACTUAL\s*\$\s*\n?\s*([\d.]+,\d{2})/i) ||
+    textoCompleto.match(/SALDO ACTUAL\s+([\d.]+,\d{2})/i);
   const sobreMatch = textoCompleto.match(/Sobre\s*\((\d+)\)/i);
   if (totalMatch) {
     const totalAPagar = Number(totalMatch[1].replace(/\./g, "").replace(",", "."));
