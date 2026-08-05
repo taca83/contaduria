@@ -66,8 +66,8 @@ function clasificarMedioPago(cuenta) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v102 · 2026-08-03 · fix crítico BBVA: "Total a pagar" usa Saldo Actual (no Pago Mínimo/débito automático, que puede ser parcial); parser de consumos reescrito para no perder filas partidas por el lector de PDF; cuotas usan la fecha del ciclo actual + muestran cuántas quedan
-const APP_VERSION = "v102 · 2026-08-03";
+// v103 · 2026-08-03 · fix: detección de "Vencimiento actual"/"Cierre actual" del PDF BBVA más tolerante (ya no depende de que la fecha esté pegada justo al lado de la etiqueta); el cierre también queda visible en la descripción si no se encontró el vencimiento
+const APP_VERSION = "v103 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -251,7 +251,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   // Fecha de cierre del ciclo actual — la usamos para las cuotas (ver más
   // abajo) y como respaldo de fecha del "Total a pagar".
   const textoCompletoTmp = lineas.join("\n");
-  const cierreMatchTmp = textoCompletoTmp.match(/CIERRE ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+  const cierreMatchTmp = textoCompletoTmp.match(/CIERRE ACTUAL[\s\S]{0,60}?(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
   const fechaCierre = cierreMatchTmp ? fechaBbvaAIso(cierreMatchTmp[1], cierreMatchTmp[2], cierreMatchTmp[3]) : null;
 
   let seccionActual = null; // "Hernan Israel" | "Natalia Wajsman" | null
@@ -365,8 +365,8 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   const sobreMatch = textoCompleto.match(/Sobre\s*\((\d+)\)/i);
   if (totalMatch) {
     const totalAPagar = Number(totalMatch[1].replace(/\./g, "").replace(",", "."));
-    const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
-    const cierreMatch = textoCompleto.match(/CIERRE ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+    const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL[\s\S]{0,60}?(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+    const cierreMatch = textoCompleto.match(/CIERRE ACTUAL[\s\S]{0,60}?(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
 
     // Cadena de respaldo para la fecha — NUNCA cae en "hoy" (eso mandaría
     // un resumen de diciembre a la fecha real en la que lo importás, un
@@ -389,12 +389,17 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
     }
 
     if (totalAPagar > 0 && fechaVenc) {
+      const notaFecha = vencMatch
+        ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})`
+        : cierreMatch
+          ? ` (cierre ${cierreMatch[1]}-${cierreMatch[2]}-${cierreMatch[3]}, no encontré el vencimiento)`
+          : "";
       filas.push({
         date: fechaVenc,
         type: "gasto",
         category: "Tarjetas",
         amount: totalAPagar,
-        desc: `Total a pagar — resumen ${cuenta}${vencMatch ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})` : ""}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
+        desc: `Total a pagar — resumen ${cuenta}${notaFecha}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
         account: cuenta,
         origen: "pdf_bbva",
         pagado: false,
