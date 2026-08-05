@@ -51,8 +51,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v76 · 2026-08-03 · Gastos rápidos: "Editar" y "Agregar" separados en dos botones/estados independientes
-const APP_VERSION = "v76 · 2026-08-03";
+// v78 · 2026-08-03 · fix: los chips de filtro en Movimientos ya no se desbordan de la pantalla (pasan a otra línea en vez de cortarse)
+const APP_VERSION = "v78 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1699,6 +1699,7 @@ export default function FinanzasApp() {
               totalGastosUsd={totalGastosUsd}
               isDesktop={isDesktop}
               selectedMonth={selectedMonth}
+              budgets={budgets}
             />
           )}
           {tab === "movimientos" && (
@@ -2070,7 +2071,7 @@ function DivisasTab({ cambiosStats, cambios, onDelete }) {
   );
 }
 
-function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd, isDesktop, selectedMonth }) {
+function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd, isDesktop, selectedMonth, budgets }) {
   const [expandedCat, setExpandedCat] = useState(null);
   const [rango, setRango] = useState(6);
   const [compareMode, setCompareMode] = useState(false);
@@ -2110,6 +2111,19 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
     });
     return resultado.sort((a, b) => (b.variacion ?? 999999) - (a.variacion ?? 999999));
   }, [entries, selectedMonth, umbralAlerta]);
+
+  const alertasPresupuesto = useMemo(() => {
+    const gastoMap = Object.fromEntries(gastosPorCategoria.map((g) => [g.name, g.value]));
+    const resultado = [];
+    Object.entries(budgets || {}).forEach(([cat, limite]) => {
+      const limiteNum = Number(limite) || 0;
+      if (limiteNum <= 0) return;
+      const gastado = gastoMap[cat] || 0;
+      const pct = (gastado / limiteNum) * 100;
+      if (pct >= 80) resultado.push({ categoria: cat, gastado, limite: limiteNum, pct, superado: gastado > limiteNum });
+    });
+    return resultado.sort((a, b) => b.pct - a.pct);
+  }, [budgets, gastosPorCategoria]);
 
   function calcularMes(key) {
     const [y, m] = key.split("-").map(Number);
@@ -2173,6 +2187,30 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      {alertasPresupuesto.length > 0 && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>🎯 Presupuestos cerca del límite</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {alertasPresupuesto.map((a) => (
+              <div key={a.categoria}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                  <span style={{ fontWeight: 700 }}>{a.categoria}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color: a.superado ? BRICK : GOLD }}>
+                    {fmtARS(a.gastado)} / {fmtARS(a.limite)}
+                  </span>
+                </div>
+                <div style={{ height: 6, borderRadius: 4, background: PAPER_DIM, overflow: "hidden" }}>
+                  <div style={{ width: `${Math.min(100, a.pct)}%`, height: "100%", background: a.superado ? BRICK : GOLD }} />
+                </div>
+                <div style={{ fontSize: 11, color: a.superado ? BRICK : GOLD, marginTop: 3, fontWeight: 600 }}>
+                  {a.superado ? `¡Superado! (${Math.round(a.pct)}%)` : `${Math.round(a.pct)}% del presupuesto`}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>⚠️ Aumentos de gasto</div>
@@ -2488,7 +2526,7 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
         placeholder="Buscar por descripción, categoría, cuenta o quién lo cargó..."
         style={{ ...inputStyle, marginBottom: 10 }}
       />
-      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
         {[["mes", "Buscar en el mes"], ["historial", "Buscar en todo el historial"]].map(([k, l]) => (
           <button key={k} onClick={() => setAlcance(k)} style={{
             padding: "6px 12px", borderRadius: 20, fontSize: 12, cursor: "pointer",
@@ -2497,8 +2535,8 @@ function MovimientosTab({ entries, allEntries, onDelete, onEditDesc, onEditAmoun
           }}>{l}</button>
         ))}
       </div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-        {[["todos", "Todos"], ["gasto", "Gastos"], ["ingreso", "Ingresos"], ["cambio", "Cambios USD"], ["pendientes", "Pendientes de pago"]].map(([k, l]) => (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+        {[["todos", "Todos"], ["gasto", "Gastos"], ["ingreso", "Ingresos"], ["cambio", "Cambios USD"], ["pendientes", "Pendientes"]].map(([k, l]) => (
           <button key={k} onClick={() => setFilter(k)} style={{
             padding: "6px 12px", borderRadius: 20, fontSize: 12.5, cursor: "pointer",
             border: `1px solid ${filter === k ? TEAL : "#ddd6c4"}`,
