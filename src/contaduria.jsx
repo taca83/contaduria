@@ -53,12 +53,21 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v84 · 2026-08-03 · nuevo campo "¿Quién lo gastó?" en el formulario (distinto de quién lo cargó); "Por persona" ahora agrupa por eso
-const APP_VERSION = "v84 · 2026-08-03";
+// v85 · 2026-08-03 · fix: "Por persona" unifica nombres sin importar mayúsculas/minúsculas ("negro" y "Negro" ya no aparecen separados)
+const APP_VERSION = "v85 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
   return v.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
+}
+
+// Unifica "negro" / "Negro" / "NEGRO" bajo un mismo nombre (mayúscula
+// inicial, resto tal cual) — para que agrupar "por persona" no separe al
+// mismo miembro del hogar en dos filas distintas por una diferencia de
+// mayúsculas/minúsculas al cargar el nombre en algún momento.
+function capitalizar(s) {
+  const t = (s || "").trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
 }
 
 // Evalúa expresiones simples tipo calculadora en el campo de Monto
@@ -3574,7 +3583,7 @@ function PersonasTab({ thisMonthEntries, monthLabel }) {
     thisMonthEntries
       .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS")
       .forEach((e) => {
-        const persona = (e.persona || e.who || "").trim() || "Sin nombre";
+        const persona = capitalizar(e.persona || e.who) || "Sin nombre";
         map[persona] = (map[persona] || 0) + Number(e.amount);
       });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
@@ -3585,7 +3594,7 @@ function PersonasTab({ thisMonthEntries, monthLabel }) {
     thisMonthEntries
       .filter((e) => e.type === "ingreso" || e.type === "cambio")
       .forEach((e) => {
-        const persona = (e.persona || e.who || "").trim() || "Sin nombre";
+        const persona = capitalizar(e.persona || e.who) || "Sin nombre";
         map[persona] = (map[persona] || 0) + Number(e.amount);
       });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
@@ -3616,7 +3625,7 @@ function PersonasTab({ thisMonthEntries, monthLabel }) {
                 const isOpen = expandedPersona === `gasto-${p.name}`;
                 const movs = isOpen
                   ? thisMonthEntries
-                      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS" && ((e.persona || e.who || "").trim() || "Sin nombre") === p.name)
+                      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS" && (capitalizar(e.persona || e.who) || "Sin nombre") === p.name)
                       .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
                   : [];
                 return (
