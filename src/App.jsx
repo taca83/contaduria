@@ -66,8 +66,8 @@ function clasificarMedioPago(cuenta) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v98 · 2026-08-03 · fix: importar PDFs nunca más queda colgado en "Importando..." — timeout por archivo al leer, timeout+lotes de 40 al guardar, y siempre se avisa el error en vez de trabarse en silencio
-const APP_VERSION = "v98 · 2026-08-03";
+// v99 · 2026-08-03 · fecha con selector propio (Día/Mes con nombre/Año, sin ambigüedad de formato) + guardar un movimiento nuevo nunca más queda colgado en "Guardando..." sin avisar (timeout + error visible)
+const APP_VERSION = "v99 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -562,6 +562,44 @@ function monthKey(dateStr) {
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
+
+const MESES_NOMBRE = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+// Selector de fecha propio (Día / Mes con nombre / Año) — el input nativo
+// type="date" muestra el formato según el idioma del sistema operativo del
+// navegador (por eso a veces se ve mm/dd/yyyy sin que podamos forzarlo por
+// CSS); con selects explícitos el orden día-mes-año queda fijo siempre, y
+// al escribir el mes por nombre no hay ninguna ambigüedad posible.
+function FechaInput({ value, onChange }) {
+  const partes = (value || todayISO()).split("-").map(Number);
+  const y = partes[0] || new Date().getFullYear();
+  const m = partes[1] || 1;
+  const d = partes[2] || 1;
+  const diasEnMes = new Date(y, m, 0).getDate();
+
+  function actualizar(nuevoD, nuevoM, nuevoY) {
+    const maxDia = new Date(nuevoY, nuevoM, 0).getDate();
+    const diaFinal = Math.min(nuevoD, maxDia);
+    onChange(`${nuevoY}-${String(nuevoM).padStart(2, "0")}-${String(diaFinal).padStart(2, "0")}`);
+  }
+
+  const anioActual = new Date().getFullYear();
+  const anios = Array.from({ length: 8 }, (_, i) => anioActual - 6 + i);
+
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <select value={d} onChange={(e) => actualizar(Number(e.target.value), m, y)} style={{ ...inputStyle, flex: 1 }}>
+        {Array.from({ length: diasEnMes }, (_, i) => i + 1).map((dd) => <option key={dd} value={dd}>{dd}</option>)}
+      </select>
+      <select value={m} onChange={(e) => actualizar(d, Number(e.target.value), y)} style={{ ...inputStyle, flex: 2 }}>
+        {MESES_NOMBRE.map((nombre, i) => <option key={i} value={i + 1}>{nombre}</option>)}
+      </select>
+      <select value={y} onChange={(e) => actualizar(d, m, Number(e.target.value))} style={{ ...inputStyle, flex: 1 }}>
+        {anios.map((yy) => <option key={yy} value={yy}>{yy}</option>)}
+      </select>
+    </div>
+  );
+}
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
@@ -861,6 +899,7 @@ export default function FinanzasApp() {
   const [showFoto, setShowFoto] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
 
   // --- Layout responsive: por ahora un único breakpoint (≥900px = desktop) ---
   // que ensancha el contenido y acomoda algunas secciones en grilla. El resto
@@ -1157,7 +1196,11 @@ export default function FinanzasApp() {
       return next;
     });
     if (!HAS_SUPABASE) return full;
-    await sb("entries", { method: "POST", body: JSON.stringify([{ ...entryToDb(full), household_id: householdId }]) });
+    await conTimeout(
+      sb("entries", { method: "POST", body: JSON.stringify([{ ...entryToDb(full), household_id: householdId }]) }),
+      20000,
+      "Guardar tardó demasiado (más de 20s). Puede ser un problema de conexión — probá de nuevo."
+    );
     return full;
   }
 
@@ -2308,9 +2351,23 @@ export default function FinanzasApp() {
 
       {showForm && (
         <EntryForm
-          onClose={() => { setShowForm(false); setVoicePrefill(null); }}
-          onSave={async (entry) => { setSaving(true); await addEntry(entry); setSaving(false); setShowForm(false); setVoicePrefill(null); }}
+          onClose={() => { setShowForm(false); setVoicePrefill(null); setSaveError(null); }}
+          onSave={async (entry) => {
+            setSaving(true);
+            setSaveError(null);
+            try {
+              await addEntry(entry);
+              setShowForm(false);
+              setVoicePrefill(null);
+            } catch (err) {
+              console.error("Error guardando el movimiento:", err);
+              setSaveError(err.message || "No se pudo guardar. Probá de nuevo.");
+            } finally {
+              setSaving(false);
+            }
+          }}
           saving={saving}
+          saveError={saveError}
           categories={categories}
           initialData={voicePrefill}
           profileName={profileName}
@@ -3082,7 +3139,7 @@ function EditarMovimientoModal({ entry, categories, onClose, onSave, onDelete })
         />
 
         <label style={labelStyle}>Fecha</label>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }} />
+        <div style={{ marginBottom: 14 }}><FechaInput value={date} onChange={setDate} /></div>
 
         <label style={labelStyle}>Cuenta (opcional)</label>
         <input value={account} onChange={(e) => setAccount(e.target.value)} placeholder="Ej: Visa BBVA, Efectivo..." style={{ ...inputStyle, marginBottom: 14 }} />
@@ -5477,7 +5534,7 @@ function VoiceEntryModal({ onClose, onExtracted, categories }) {
   );
 }
 
-function EntryForm({ onClose, onSave, saving, categories, initialData, profileName, miembrosHogar }) {
+function EntryForm({ onClose, onSave, saving, saveError, categories, initialData, profileName, miembrosHogar }) {
   const [type, setType] = useState(initialData?.type || "gasto");
   const [amount, setAmount] = useState(initialData?.amount != null ? String(initialData.amount) : "");
   const [category, setCategory] = useState(initialData?.category || categories[0]);
@@ -5654,7 +5711,13 @@ function EntryForm({ onClose, onSave, saving, categories, initialData, profileNa
         )}
 
         <label style={labelStyle}>Fecha</label>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ ...inputStyle, marginBottom: 20 }} />
+        <div style={{ marginBottom: 20 }}><FechaInput value={date} onChange={setDate} /></div>
+
+        {saveError && (
+          <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 10, background: "#fbeee6", padding: "8px 10px", borderRadius: 6 }}>
+            {saveError}
+          </div>
+        )}
 
         <button onClick={handleSubmit} disabled={saving} style={{ ...btnPrimary, width: "100%", justifyContent: "center", padding: "13px", fontSize: 15 }}>
           {saving ? "Guardando..." : "Guardar movimiento"}
