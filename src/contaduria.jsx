@@ -53,8 +53,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v85 · 2026-08-03 · fix: "Por persona" unifica nombres sin importar mayúsculas/minúsculas ("negro" y "Negro" ya no aparecen separados)
-const APP_VERSION = "v85 · 2026-08-03";
+// v86 · 2026-08-03 · Mi hogar: editar el nombre de un miembro, con cascada automática a los movimientos viejos que tenían el nombre anterior
+const APP_VERSION = "v86 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1318,6 +1318,22 @@ export default function FinanzasApp() {
     await sb(`quick_entries?id=eq.${id}`, { method: "DELETE" });
   }
 
+  async function renombrarMiembro(nombreViejo, nombreNuevo) {
+    const limpio = (nombreNuevo || "").trim();
+    if (!limpio) return { error: "Poné un nombre." };
+    if (limpio === nombreViejo) return { ok: true };
+    if (!HAS_SUPABASE) return { error: "No aplica en vista previa local." };
+    try {
+      await sb("rpc/renombrar_miembro", { method: "POST", body: JSON.stringify({ p_nombre_viejo: nombreViejo, p_nombre_nuevo: limpio }) });
+      await refrescarEntries();
+      const rows = await sb("rpc/get_my_household_members", { method: "POST", body: "{}" }).catch(() => null);
+      if (rows) setMiembrosHogar(rows.map((r) => r.display_name).filter(Boolean));
+      return { ok: true, miembros: rows };
+    } catch (e) {
+      return { error: e.message || "No se pudo renombrar." };
+    }
+  }
+
   async function addWhatsappLink(phoneRaw, nombre) {
     const phone = (phoneRaw || "").replace(/[^\d]/g, ""); // solo dígitos, formato E.164 sin "+"
     if (!phone || phone.length < 10) return { error: "Poné el número completo, con código de país (ej: 5491122334455)." };
@@ -1828,6 +1844,7 @@ export default function FinanzasApp() {
               profileName={profileName}
               onAddWhatsapp={addWhatsappLink}
               onDeleteWhatsapp={deleteWhatsappLink}
+              onRenombrarMiembro={renombrarMiembro}
             />
           )}
           {tab === "categorias" && (
@@ -3110,7 +3127,11 @@ function ImportarTab({ onImport, categoryOverrides }) {
   );
 }
 
-function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, onActivarBiometria, onDesactivarBiometria, bioBusy, bioError, whatsappLinks, profileName, onAddWhatsapp, onDeleteWhatsapp }) {
+function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, onActivarBiometria, onDesactivarBiometria, bioBusy, bioError, whatsappLinks, profileName, onAddWhatsapp, onDeleteWhatsapp, onRenombrarMiembro }) {
+  const [editandoNombreDe, setEditandoNombreDe] = useState(null);
+  const [nombreNuevo, setNombreNuevo] = useState("");
+  const [renombrando, setRenombrando] = useState(false);
+  const [renombrarError, setRenombrarError] = useState(null);
   const [hh, setHh] = useState(null);
   const [miembros, setMiembros] = useState(null);
   const [copiado, setCopiado] = useState(false);
@@ -3161,6 +3182,23 @@ function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, 
     navigator.clipboard?.writeText(hh.invite_code);
     setCopiado(true);
     setTimeout(() => setCopiado(false), 2000);
+  }
+
+  function empezarRenombrar(nombreActual) {
+    setEditandoNombreDe(nombreActual);
+    setNombreNuevo(nombreActual);
+    setRenombrarError(null);
+  }
+
+  async function handleRenombrar(nombreViejo) {
+    setRenombrarError(null);
+    setRenombrando(true);
+    const res = await onRenombrarMiembro(nombreViejo, nombreNuevo);
+    setRenombrando(false);
+    if (res?.error) { setRenombrarError(res.error); return; }
+    if (res?.miembros) setMiembros(res.miembros);
+    else setMiembros((prev) => (prev || []).map((m) => (m.display_name === nombreViejo ? { ...m, display_name: nombreNuevo.trim() } : m)));
+    setEditandoNombreDe(null);
   }
 
   async function handleAddWhatsapp() {
@@ -3215,10 +3253,42 @@ function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, 
             {miembros && miembros.length > 0 && (
               <div>
                 <div style={{ fontSize: 11.5, color: "#8a9698", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Miembros</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  {miembros.map((m, i) => (
-                    <div key={i} style={{ fontSize: 13 }}>{m.display_name} {m.role === "owner" ? "· dueño/a" : ""}</div>
-                  ))}
+                <div style={{ fontSize: 11.5, color: "#8a9698", marginBottom: 10 }}>
+                  Si algún movimiento viejo quedó guardado con un nombre distinto (ej. "Nati" en vez de "Natalia"), corregilo acá — el cambio se aplica también a todos los movimientos ya cargados con el nombre anterior.
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {miembros.map((m, i) => {
+                    const enEdicion = editandoNombreDe === m.display_name;
+                    return (
+                      <div key={i}>
+                        {enEdicion ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <input
+                              value={nombreNuevo}
+                              onChange={(e) => setNombreNuevo(e.target.value)}
+                              autoFocus
+                              style={{ ...inputStyle, flex: 1, padding: "6px 8px", fontSize: 13 }}
+                              onKeyDown={(e) => { if (e.key === "Enter") handleRenombrar(m.display_name); if (e.key === "Escape") setEditandoNombreDe(null); }}
+                            />
+                            <button onClick={() => handleRenombrar(m.display_name)} disabled={renombrando} aria-label="Confirmar" style={{ background: "none", border: "none", cursor: "pointer", color: GREEN }}>
+                              <Check size={17} />
+                            </button>
+                            <button onClick={() => setEditandoNombreDe(null)} aria-label="Cancelar" style={{ background: "none", border: "none", cursor: "pointer", color: "#8a9698" }}>
+                              <X size={17} />
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                            <span style={{ flex: 1 }}>{m.display_name} {m.role === "owner" ? "· dueño/a" : ""}</span>
+                            <button onClick={() => empezarRenombrar(m.display_name)} aria-label="Editar nombre" style={{ background: "none", border: "none", cursor: "pointer", color: TEAL }}>
+                              <Pencil size={14} />
+                            </button>
+                          </div>
+                        )}
+                        {enEdicion && renombrarError && <div style={{ color: BRICK, fontSize: 11.5, marginTop: 4 }}>{renombrarError}</div>}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
