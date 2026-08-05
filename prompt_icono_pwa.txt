@@ -1,0 +1,16 @@
+Puse 4 archivos nuevos en la carpeta public/: icon-512.png, icon-192.png,
+apple-touch-icon.png y manifest.json.
+
+Por favor, agregá dentro del <head> de index.html estas líneas (si alguna
+ya existe, no la dupliques):
+
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" type="image/png" href="/icon-192.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<meta name="theme-color" content="#1B2A2E" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Contaduría" />
+
+Después corré npm run build, y si compila bien, hacé git add, commit y
+push a master.

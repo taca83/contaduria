@@ -67,8 +67,10 @@ Si el ticket muestra una fecha, usala en formato YYYY-MM-DD. Si no se ve ninguna
 Si no podés leer el monto TOTAL con claridad, poné "monto": null en vez de inventar un número.
 "comercio" es el nombre del negocio/local si se ve (ej. "Carrefour", "YPF"). "desc" es cualquier detalle extra corto y útil (ej. "2 productos", vacío si no hay nada relevante).
 
+"pagado": marcá true si es un ticket/comprobante de una compra ya realizada (lo normal en un ticket de supermercado, combustible, etc.). Marcá false si es una factura/boleta que todavía no está pagada — señales típicas: dice "A PAGAR", "VENCIMIENTO", "SALDO PENDIENTE", "FACTURA" sin indicar que ya se abonó, o es un arancel/expensa. Si tenés dudas, poné true.
+
 Respondé SOLO con este JSON, sin texto adicional ni backticks:
-{"monto": number | null, "fecha": "YYYY-MM-DD", "categoria": string, "comercio": string, "desc": string}`;
+{"monto": number | null, "fecha": "YYYY-MM-DD", "categoria": string, "comercio": string, "desc": string, "pagado": boolean}`;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",

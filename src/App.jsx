@@ -52,10 +52,22 @@ const PAPER_DIM = "#EFEBE2";
 
 const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7CB1", "#C97B3D", "#8A8F5C", "#9C6B9E"];
 
+// Agrupa cualquier nombre de cuenta en un "medio de pago" macro (Efectivo,
+// Mercado Pago, Tarjetas de crédito, Otros) — para no tener que mirar 5
+// tarjetas sueltas en la pestaña Cuentas, solo el panorama general primero.
+function clasificarMedioPago(cuenta) {
+  const c = (cuenta || "").toLowerCase().trim();
+  if (!c) return "Otros medios de pago";
+  if (c.includes("efectivo")) return "Efectivo";
+  if (c.includes("mercado pago") || c.includes("mercadopago")) return "Mercado Pago";
+  if (c.includes("visa") || c.includes("master") || c.includes("amex") || c.includes("american express") || c.includes("tarjeta")) return "Tarjetas de crédito";
+  return "Otros medios de pago";
+}
+
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v94 · 2026-08-03 · modo edición de Movimientos rediseñado: modal completo (categoría, descripción, monto, fecha, cuenta, pagado, borrar) en vez de edición apretada dentro de la fila
-const APP_VERSION = "v94 · 2026-08-03";
+// v96 · 2026-08-03 · Resumen: tarjeta "Pendientes de pago" (todo el historial, marcar pagado ahí mismo) · Cuentas: agrupado por medio de pago macro (Efectivo/Mercado Pago/Tarjetas de crédito/Otros), expandible por tarjeta real
+const APP_VERSION = "v96 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -69,6 +81,14 @@ function fmtARS(n) {
 function capitalizar(s) {
   const t = (s || "").trim();
   return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
+// Los modales (editar movimiento, foto, voz, nuevo movimiento) se abren
+// como "hoja pegada abajo" en el celu, pero en una pantalla ancha eso se
+// ve raro flotando lejos del contenido — ahí los mostramos centrados,
+// como un diálogo normal de escritorio.
+function esPantallaAncha() {
+  return typeof window !== "undefined" && window.innerWidth >= 900;
 }
 
 // Evalúa expresiones simples tipo calculadora en el campo de Monto
@@ -1934,10 +1954,11 @@ export default function FinanzasApp() {
               isDesktop={isDesktop}
               selectedMonth={selectedMonth}
               budgets={budgets}
+              onTogglePagado={toggleEntryPagado}
             />
           )}
           {tab === "movimientos" && (
-            <MovimientosTab allEntries={entries} entries={thisMonthEntries} categories={categories} onDelete={deleteEntry} onEditDesc={editEntryDesc} onEditAmount={editEntryAmount} onEditFull={editEntryFull} onTogglePagado={toggleEntryPagado} profileName={profileName} monthLabel={monthLabel(selectedMonth)} />
+            <MovimientosTab allEntries={entries} entries={thisMonthEntries} categories={categories} onDelete={deleteEntry} onEditDesc={editEntryDesc} onEditAmount={editEntryAmount} onEditFull={editEntryFull} onTogglePagado={toggleEntryPagado} profileName={profileName} monthLabel={monthLabel(selectedMonth)} isDesktop={isDesktop} />
           )}
           {tab === "ahorros" && (
             <AhorrosTab entries={entries.filter((e) => e.type === "ahorro")} onDelete={deleteEntry} totalAhorradoHistorico={totalAhorradoHistorico} />
@@ -2323,7 +2344,7 @@ function DivisasTab({ cambiosStats, cambios, onDelete }) {
   );
 }
 
-function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd, isDesktop, selectedMonth, budgets }) {
+function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisMonthEntries, cambiosStats, totalGastosUsd, isDesktop, selectedMonth, budgets, onTogglePagado }) {
   const [expandedCat, setExpandedCat] = useState(null);
   const [rango, setRango] = useState(6);
   const [compareMode, setCompareMode] = useState(false);
@@ -2331,6 +2352,22 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   // Ventana de 3 meses para "Resumen mensual" en el celu, navegable con
   // flechas — independiente del selector de rango de Evolución de arriba.
   const [resumenOffset, setResumenOffset] = useState(0);
+  const [marcandoPagado, setMarcandoPagado] = useState(null);
+
+  // Pendientes de pago de TODO el historial (no solo el mes que estás
+  // mirando) — para que nada quede olvidado aunque cambies de mes.
+  const pendientesDePago = useMemo(() => {
+    return entries
+      .filter((e) => e.type === "gasto" && e.pagado === false)
+      .sort((a, b) => (a.date || "").localeCompare(b.date || "")); // más viejo primero
+  }, [entries]);
+  const totalPendiente = pendientesDePago.reduce((s, e) => s + Number(e.amount), 0);
+
+  async function handleMarcarPagado(id) {
+    setMarcandoPagado(id);
+    await onTogglePagado(id, true);
+    setMarcandoPagado(null);
+  }
 
   // Umbral para las alertas de "gasto que subió mucho" — se guarda en este
   // dispositivo para no tener que reconfigurarlo cada vez.
@@ -2439,6 +2476,35 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      {pendientesDePago.length > 0 && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>💳 Pendientes de pago</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color: GOLD }}>{fmtARS(totalPendiente)} en total</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {pendientesDePago.map((e) => (
+              <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "#fdf1de", borderRadius: 8, gap: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.desc || e.category}</div>
+                  <div style={{ fontSize: 11, color: "#8a9698" }}>{e.date} · {e.category}{e.account ? ` · ${e.account}` : ""}</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700 }}>{fmtARS(e.amount)}</div>
+                  <button
+                    onClick={() => handleMarcarPagado(e.id)}
+                    disabled={marcandoPagado === e.id}
+                    style={{ ...btnPrimary, background: GREEN, padding: "6px 10px", fontSize: 11.5 }}
+                  >
+                    {marcandoPagado === e.id ? "..." : "Marcar pagado"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {alertasPresupuesto.length > 0 && (
         <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>🎯 Presupuestos cerca del límite</div>
@@ -2917,8 +2983,8 @@ function EditarMovimientoModal({ entry, categories, onClose, onSave, onDelete })
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 25 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: "100%", maxWidth: 480, borderRadius: "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto" }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: esPantallaAncha() ? "center" : "flex-end", justifyContent: "center", zIndex: 25 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: esPantallaAncha() ? 480 : "100%", maxWidth: 480, borderRadius: esPantallaAncha() ? 16 : "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto", boxShadow: esPantallaAncha() ? "0 20px 60px rgba(27,42,46,0.3)" : "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>Editar movimiento</div>
           <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer" }} aria-label="Cerrar"><X size={22} /></button>
@@ -3985,6 +4051,7 @@ function CotizacionesTab() {
 }
 
 function CuentasTab({ thisMonthEntries, monthLabel, onRenombrarCuenta }) {
+  const [expandedMedio, setExpandedMedio] = useState(null);
   const [expandedCuenta, setExpandedCuenta] = useState(null);
   const [editandoCuentaDe, setEditandoCuentaDe] = useState(null);
   const [nombreCuentaNuevo, setNombreCuentaNuevo] = useState("");
@@ -4000,16 +4067,31 @@ function CuentasTab({ thisMonthEntries, monthLabel, onRenombrarCuenta }) {
     setEditandoCuentaDe(null);
   }
 
-  const gastosPorCuenta = useMemo(() => {
+  const gastosArs = useMemo(
+    () => thisMonthEntries.filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS"),
+    [thisMonthEntries]
+  );
+
+  // Nivel 1: por medio de pago macro (Efectivo / Mercado Pago / Tarjetas de crédito / Otros)
+  const gastosPorMedio = useMemo(() => {
     const map = {};
-    thisMonthEntries
-      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS")
-      .forEach((e) => {
-        const cuenta = (e.account || "").trim() || "Sin cuenta especificada";
-        map[cuenta] = (map[cuenta] || 0) + Number(e.amount);
-      });
+    gastosArs.forEach((e) => {
+      const medio = clasificarMedioPago(e.account);
+      map[medio] = (map[medio] || 0) + Number(e.amount);
+    });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  }, [thisMonthEntries]);
+  }, [gastosArs]);
+
+  // Nivel 2: dentro de un medio, por cuenta/tarjeta real
+  function cuentasDentroDe(medio) {
+    const map = {};
+    gastosArs.forEach((e) => {
+      if (clasificarMedioPago(e.account) !== medio) return;
+      const cuenta = (e.account || "").trim() || "Sin cuenta especificada";
+      map[cuenta] = (map[cuenta] || 0) + Number(e.amount);
+    });
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }
 
   const ingresosPorCuenta = useMemo(() => {
     const map = {};
@@ -4025,81 +4107,97 @@ function CuentasTab({ thisMonthEntries, monthLabel, onRenombrarCuenta }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ fontSize: 12.5, color: "#8a9698" }}>
-        Gastos e ingresos de {monthLabel}, agrupados por tarjeta/cuenta/efectivo — usa el campo "Cuenta" que ya cargás en cada movimiento (Visa BBVA, Mastercard Black, ARQ, Mercado Pago, Efectivo, etc.), así que si tenés más de una tarjeta, cada una aparece por separado. Si dos nombres son en realidad la misma tarjeta (ej. "Visa Signature" y "Visa BBVA Hernán"), tocá el lápiz al lado del nombre para unificarlas.
+        Gastos de {monthLabel}, agrupados por medio de pago — Efectivo, Mercado Pago, Tarjetas de crédito (todas juntas) y Otros. Tocá cualquiera para ver el detalle por tarjeta/cuenta real, y de ahí los movimientos. Si dos nombres son en realidad la misma tarjeta, tocá el lápiz para unificarlos.
       </div>
 
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
-        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Gastos por cuenta</div>
-        {gastosPorCuenta.length === 0 ? <EmptyState text="Todavía no cargaste gastos este mes." /> : (
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Gastos por medio de pago</div>
+        {gastosPorMedio.length === 0 ? <EmptyState text="Todavía no cargaste gastos este mes." /> : (
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <div style={{ width: 180, height: 180 }}>
               <ResponsiveContainer>
                 <PieChart>
-                  <Pie data={gastosPorCuenta} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
-                    {gastosPorCuenta.map((_, i) => <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]} />)}
+                  <Pie data={gastosPorMedio} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
+                    {gastosPorMedio.map((_, i) => <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]} />)}
                   </Pie>
                   <Tooltip formatter={(v) => fmtARS(v)} />
                 </PieChart>
               </ResponsiveContainer>
             </div>
-            <div style={{ flex: 1, minWidth: 160 }}>
-              {gastosPorCuenta.map((c, i) => {
-                const isOpen = expandedCuenta === `gasto-${c.name}`;
-                const movs = isOpen
-                  ? thisMonthEntries
-                      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS" && ((e.account || "").trim() || "Sin cuenta especificada") === c.name)
-                      .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
-                  : [];
+            <div style={{ flex: 1, minWidth: 200 }}>
+              {gastosPorMedio.map((medio, i) => {
+                const medioAbierto = expandedMedio === medio.name;
+                const cuentas = medioAbierto ? cuentasDentroDe(medio.name) : [];
                 return (
-                  <div key={c.name}>
-                    {editandoCuentaDe === c.name ? (
-                      <div style={{ padding: "6px 0" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <input
-                            value={nombreCuentaNuevo}
-                            onChange={(e) => setNombreCuentaNuevo(e.target.value)}
-                            autoFocus
-                            style={{ ...inputStyle, flex: 1, padding: "6px 8px", fontSize: 13 }}
-                            onKeyDown={(e) => { if (e.key === "Enter") handleRenombrarCuenta(c.name); if (e.key === "Escape") setEditandoCuentaDe(null); }}
-                          />
-                          <button onClick={() => handleRenombrarCuenta(c.name)} disabled={renombrandoCuenta} aria-label="Confirmar" style={{ background: "none", border: "none", cursor: "pointer", color: GREEN }}>
-                            <Check size={17} />
-                          </button>
-                          <button onClick={() => setEditandoCuentaDe(null)} aria-label="Cancelar" style={{ background: "none", border: "none", cursor: "pointer", color: "#8a9698" }}>
-                            <X size={17} />
-                          </button>
-                        </div>
-                        <div style={{ fontSize: 11, color: "#8a9698", marginTop: 4 }}>
-                          Va a renombrar TODOS los movimientos viejos de "{c.name}" (de cualquier mes) — útil si en realidad es la misma tarjeta que otra cuenta.
-                        </div>
-                        {errorRenombrarCuenta && <div style={{ color: BRICK, fontSize: 11.5, marginTop: 4 }}>{errorRenombrarCuenta}</div>}
-                      </div>
-                    ) : (
-                      <div
-                        style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}
-                      >
-                        <div onClick={() => setExpandedCuenta(isOpen ? null : `gasto-${c.name}`)} style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer", minWidth: 0 }}>
-                          <div style={{ width: 10, height: 10, borderRadius: "50%", background: CAT_COLORS[i % CAT_COLORS.length], flexShrink: 0 }} />
-                          <div style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
-                          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 }}>{fmtARS(c.value)}</div>
-                        </div>
-                        <button
-                          onClick={() => { setEditandoCuentaDe(c.name); setNombreCuentaNuevo(c.name); setErrorRenombrarCuenta(null); }}
-                          aria-label="Renombrar/unificar cuenta"
-                          style={{ background: "none", border: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }}
-                        >
-                          <Pencil size={13} />
-                        </button>
-                      </div>
-                    )}
-                    {isOpen && (
-                      <div style={{ marginLeft: 18, marginBottom: 6, display: "flex", flexDirection: "column", gap: 3 }}>
-                        {movs.map((m) => (
-                          <div key={m.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "#5a6b6d" }}>
-                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{m.desc || m.category}</span>
-                            <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(m.amount)}</span>
-                          </div>
-                        ))}
+                  <div key={medio.name}>
+                    <div
+                      onClick={() => { setExpandedMedio(medioAbierto ? null : medio.name); setExpandedCuenta(null); }}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", cursor: "pointer" }}
+                    >
+                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: CAT_COLORS[i % CAT_COLORS.length], flexShrink: 0 }} />
+                      <div style={{ flex: 1, fontSize: 14, fontWeight: 700 }}>{medio.name}</div>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, fontWeight: 700 }}>{fmtARS(medio.value)}</div>
+                    </div>
+                    {medioAbierto && (
+                      <div style={{ marginLeft: 18, marginBottom: 8, display: "flex", flexDirection: "column", gap: 2 }}>
+                        {cuentas.map((c) => {
+                          const cuentaAbierta = expandedCuenta === c.name;
+                          const movs = cuentaAbierta
+                            ? gastosArs.filter((e) => ((e.account || "").trim() || "Sin cuenta especificada") === c.name)
+                                .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
+                            : [];
+                          return (
+                            <div key={c.name}>
+                              {editandoCuentaDe === c.name ? (
+                                <div style={{ padding: "6px 0" }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                    <input
+                                      value={nombreCuentaNuevo}
+                                      onChange={(e) => setNombreCuentaNuevo(e.target.value)}
+                                      autoFocus
+                                      style={{ ...inputStyle, flex: 1, padding: "6px 8px", fontSize: 13 }}
+                                      onKeyDown={(e) => { if (e.key === "Enter") handleRenombrarCuenta(c.name); if (e.key === "Escape") setEditandoCuentaDe(null); }}
+                                    />
+                                    <button onClick={() => handleRenombrarCuenta(c.name)} disabled={renombrandoCuenta} aria-label="Confirmar" style={{ background: "none", border: "none", cursor: "pointer", color: GREEN }}>
+                                      <Check size={17} />
+                                    </button>
+                                    <button onClick={() => setEditandoCuentaDe(null)} aria-label="Cancelar" style={{ background: "none", border: "none", cursor: "pointer", color: "#8a9698" }}>
+                                      <X size={17} />
+                                    </button>
+                                  </div>
+                                  <div style={{ fontSize: 11, color: "#8a9698", marginTop: 4 }}>
+                                    Va a renombrar TODOS los movimientos viejos de "{c.name}" (de cualquier mes) — útil si en realidad es la misma tarjeta que otra cuenta.
+                                  </div>
+                                  {errorRenombrarCuenta && <div style={{ color: BRICK, fontSize: 11.5, marginTop: 4 }}>{errorRenombrarCuenta}</div>}
+                                </div>
+                              ) : (
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+                                  <div onClick={() => setExpandedCuenta(cuentaAbierta ? null : c.name)} style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer", minWidth: 0 }}>
+                                    <div style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 }}>{fmtARS(c.value)}</div>
+                                  </div>
+                                  <button
+                                    onClick={() => { setEditandoCuentaDe(c.name); setNombreCuentaNuevo(c.name); setErrorRenombrarCuenta(null); }}
+                                    aria-label="Renombrar/unificar cuenta"
+                                    style={{ background: "none", border: "none", cursor: "pointer", color: "#c4bda8", flexShrink: 0, padding: 2 }}
+                                  >
+                                    <Pencil size={13} />
+                                  </button>
+                                </div>
+                              )}
+                              {cuentaAbierta && (
+                                <div style={{ marginLeft: 14, marginBottom: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+                                  {movs.map((m) => (
+                                    <div key={m.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "#5a6b6d" }}>
+                                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{m.desc || m.category}</span>
+                                      <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(m.amount)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -5133,8 +5231,8 @@ function FotoReciboModal({ onClose, onExtracted, categories }) {
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: "flex-end", zIndex: 25 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: "100%", borderRadius: "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto" }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: esPantallaAncha() ? "center" : "flex-end", justifyContent: "center", zIndex: 25 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: esPantallaAncha() ? 480 : "100%", maxWidth: 480, borderRadius: esPantallaAncha() ? 16 : "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto", boxShadow: esPantallaAncha() ? "0 20px 60px rgba(27,42,46,0.3)" : "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>Foto de recibo</div>
           <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer" }} aria-label="Cerrar"><X size={22} /></button>
@@ -5242,8 +5340,8 @@ function VoiceEntryModal({ onClose, onExtracted, categories }) {
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: "flex-end", zIndex: 25 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: "100%", borderRadius: "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto" }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: esPantallaAncha() ? "center" : "flex-end", justifyContent: "center", zIndex: 25 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: esPantallaAncha() ? 480 : "100%", maxWidth: 480, borderRadius: esPantallaAncha() ? 16 : "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto", boxShadow: esPantallaAncha() ? "0 20px 60px rgba(27,42,46,0.3)" : "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>Cargar por voz</div>
           <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer" }} aria-label="Cerrar"><X size={22} /></button>
@@ -5342,8 +5440,8 @@ function EntryForm({ onClose, onSave, saving, categories, initialData, profileNa
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: "flex-end", zIndex: 20 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: "100%", borderRadius: "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto" }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,42,46,0.5)", display: "flex", alignItems: esPantallaAncha() ? "center" : "flex-end", justifyContent: "center", zIndex: 20 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, width: esPantallaAncha() ? 480 : "100%", maxWidth: 480, borderRadius: esPantallaAncha() ? 16 : "16px 16px 0 0", padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto", boxShadow: esPantallaAncha() ? "0 20px 60px rgba(27,42,46,0.3)" : "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 19 }}>Nuevo movimiento</div>
           <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer" }} aria-label="Cerrar"><X size={22} /></button>
