@@ -27,6 +27,8 @@ const TAB_LABELS = {
   categorias: "Categorías",
   recurrentes: "Gastos recurrentes",
   cuentas: "Cuentas",
+  personas: "Por persona",
+  conciliar: "Conciliar pagos",
   admin: "Panel admin (ingresos a la app)",
 };
 const PRIMARY_TABS = [
@@ -35,7 +37,7 @@ const PRIMARY_TABS = [
   ["rapidos", "Gastos rápidos", Zap],
   ["importar", "Importar", Upload],
 ];
-const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "presupuestos", "cuentas", "recategorizar", "duplicados", "divisas", "historial", "ahorros", "reset"];
+const SECONDARY_TABS = ["hogar", "categorias", "recurrentes", "presupuestos", "cuentas", "personas", "recategorizar", "conciliar", "duplicados", "divisas", "historial", "ahorros", "reset"];
 const INGRESO_CATS = ["Sueldo", "Freelance", "Alquileres", "Otros ingresos"];
 const AHORRO_INSTR = ["Plazo fijo", "Dólares (billete)", "FCI", "Acciones / CEDEARs", "Cripto", "Otro"];
 
@@ -51,8 +53,8 @@ const CAT_COLORS = ["#0F6E6E", "#C9A227", "#B5473A", "#2E7D4F", "#7A5CC7", "#3E7
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v78 · 2026-08-03 · fix: los chips de filtro en Movimientos ya no se desbordan de la pantalla (pasan a otra línea en vez de cortarse)
-const APP_VERSION = "v78 · 2026-08-03";
+// v84 · 2026-08-03 · nuevo campo "¿Quién lo gastó?" en el formulario (distinto de quién lo cargó); "Por persona" ahora agrupa por eso
+const APP_VERSION = "v84 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -248,6 +250,34 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       account: cuenta,
     });
   });
+
+  // Además de los consumos, agregamos el "Total a pagar" del resumen en sí
+  // (lo que hay que transferir/debitar para cancelar la tarjeta) — se carga
+  // como Pendiente, y se marca Pagado más adelante (a mano, o vía
+  // Conciliar pagos cuando aparezca el pago real en otro resumen).
+  const textoCompleto = lineas.join("\n");
+  const totalMatch = textoCompleto.match(/LA SUMA DE\s*\$\s*([\d.]+,\d{2})/i);
+  const sobreMatch = textoCompleto.match(/Sobre\s*\((\d+)\)/i);
+  if (totalMatch) {
+    const totalAPagar = Number(totalMatch[1].replace(/\./g, "").replace(",", "."));
+    const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+    const fechaVenc = vencMatch ? fechaBbvaAIso(vencMatch[1], vencMatch[2], vencMatch[3]) : todayISO();
+    if (totalAPagar > 0) {
+      filas.push({
+        date: fechaVenc || todayISO(),
+        type: "gasto",
+        category: "Tarjetas",
+        amount: totalAPagar,
+        desc: `Total a pagar — resumen ${cuenta}${vencMatch ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})` : ""}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
+        account: cuenta,
+        pagado: false,
+      });
+    } else {
+      avisos.push("No pude leer el total a pagar del resumen (revisá el monto a mano).");
+    }
+  } else {
+    avisos.push("No encontré la línea del total a pagar en este resumen — revisalo a mano.");
+  }
 
   return { filas, avisos };
 }
@@ -598,6 +628,7 @@ function entryFromDb(row) {
     desc: row.descripcion || "",
     account: row.account || "",
     who: row.who || "",
+    persona: row.persona || "",
     usdAmount: row.usd_amount != null ? Number(row.usd_amount) : undefined,
     rate: row.rate != null ? Number(row.rate) : undefined,
     moneda: row.moneda || "ARS",
@@ -617,6 +648,7 @@ function entryToDb(e) {
     descripcion: e.desc || "",
     account: e.account || "",
     who: e.who || "",
+    persona: e.persona || e.who || "",
     usd_amount: e.usdAmount != null ? Number(e.usdAmount) : null,
     rate: e.rate != null ? Number(e.rate) : null,
     moneda: e.moneda || "ARS",
@@ -706,6 +738,7 @@ export default function FinanzasApp() {
   const [esAdmin, setEsAdmin] = useState(false);
   const [whatsappLinks, setWhatsappLinks] = useState([]);
   const [accesosRapidos, setAccesosRapidos] = useState([]);
+  const [miembrosHogar, setMiembrosHogar] = useState([]);
   const [ultimoAccesoRegistrado, setUltimoAccesoRegistrado] = useState(null);
   const [tab, setTab] = useState("resumen");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -828,6 +861,9 @@ export default function FinanzasApp() {
       .catch(() => setEsAdmin(false)); // función vieja/inexistente en Supabase → no es admin, sin romper nada
     sb("login_events", { method: "POST", body: JSON.stringify([{ household_id: hh.household_id, display_name: hh.display_name }]) })
       .catch((e) => console.error("No se pudo registrar el ingreso a la app", e));
+    sb("rpc/get_my_household_members", { method: "POST", body: "{}" })
+      .then((rows) => setMiembrosHogar((rows || []).map((r) => r.display_name).filter(Boolean)))
+      .catch((e) => console.error("No se pudo traer la lista de miembros", e));
   }
 
   // Si algún gasto/ingreso recurrente activo ya "llegó" (hoy >= día
@@ -1082,6 +1118,15 @@ export default function FinanzasApp() {
     await logAudit("marcar_pagado", anterior, anterior?.pagado, nuevoValor);
     if (!HAS_SUPABASE) return;
     await sb(`entries?id=eq.${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ pagado: nuevoValor }) });
+  }
+
+  // Confirma que un gasto "Pendiente" ya se pagó, apoyándose en que
+  // apareció un movimiento igual (mismo monto, descripción parecida) en
+  // una importación bancaria: marca el original como pagado y borra el
+  // duplicado bancario, para no contar el mismo gasto dos veces.
+  async function confirmarConciliacion(pendienteId, pagoId) {
+    await toggleEntryPagado(pendienteId, true);
+    await deleteEntry(pagoId);
   }
 
   async function addCategory(nombre) {
@@ -1801,6 +1846,8 @@ export default function FinanzasApp() {
             />
           )}
           {tab === "cuentas" && <CuentasTab thisMonthEntries={thisMonthEntries} monthLabel={monthLabel(selectedMonth)} />}
+          {tab === "personas" && <PersonasTab thisMonthEntries={thisMonthEntries} monthLabel={monthLabel(selectedMonth)} />}
+          {tab === "conciliar" && <ConciliarPagosTab entries={entries} onConfirmar={confirmarConciliacion} />}
           {tab === "admin" && <AdminTab />}
           {tab === "recategorizar" && (
             <RecategorizarTab
@@ -1972,6 +2019,8 @@ export default function FinanzasApp() {
           saving={saving}
           categories={categories}
           initialData={voicePrefill}
+          profileName={profileName}
+          miembrosHogar={miembrosHogar}
         />
       )}
     </div>
@@ -3138,7 +3187,7 @@ function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, 
             {inviteLink && (
               <div style={{ textAlign: "center", marginBottom: 16, paddingTop: 4 }}>
                 <a
-                  href={`https://wa.me/?text=${encodeURIComponent(`Te invito a sumarte a nuestro hogar en Finanzas del hogar 🏠\nEntrá acá: ${inviteLink}`)}`}
+                  href={`https://wa.me/?text=${encodeURIComponent(`Te invito a sumarte a mi hogar en Finanzas del hogar 🏠\nEntrá acá: ${inviteLink}`)}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "11px 18px", background: "#25D366", color: "#fff", borderRadius: 8, textDecoration: "none", fontWeight: 700, fontSize: 13.5, marginBottom: 16 }}
@@ -3333,6 +3382,92 @@ function CategoriasTab({ categories, contarUsos, onAdd, onRename, onDelete }) {
   );
 }
 
+function ConciliarPagosTab({ entries, onConfirmar }) {
+  const [descartadas, setDescartadas] = useState([]); // ids de pares "pendiente-pago" descartados en esta sesión
+  const [confirmando, setConfirmando] = useState(null);
+
+  const sugerencias = useMemo(() => {
+    const pendientes = entries.filter((e) => e.type === "gasto" && e.pagado === false);
+    const pagados = entries.filter((e) => e.type === "gasto" && e.pagado !== false);
+    const resultado = [];
+    pendientes.forEach((p) => {
+      pagados.forEach((pg) => {
+        if (pg.id === p.id) return;
+        if (Math.abs(Number(p.amount) - Number(pg.amount)) > 0.5) return;
+        const descP = (p.desc || p.category || "").toLowerCase().trim();
+        const descPg = (pg.desc || pg.category || "").toLowerCase().trim();
+        if (!descP || !descPg) return;
+        const coincide =
+          descP.includes(descPg) || descPg.includes(descP) ||
+          descP.split(/\s+/).some((w) => w.length > 3 && descPg.includes(w));
+        if (!coincide) return;
+        const clave = `${p.id}-${pg.id}`;
+        if (descartadas.includes(clave)) return;
+        resultado.push({ clave, pendiente: p, pago: pg });
+      });
+    });
+    return resultado;
+  }, [entries, descartadas]);
+
+  async function handleConfirmar(clave, pendienteId, pagoId) {
+    setConfirmando(clave);
+    await onConfirmar(pendienteId, pagoId);
+    setConfirmando(null);
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ fontSize: 13, color: "#8a9698" }}>
+        Compara automáticamente tus gastos marcados como "Pendiente" contra el resto de tus movimientos, buscando el mismo monto y una descripción parecida — típicamente una factura que cargaste por foto/PDF y después aparece pagada en un resumen bancario. Al confirmar, marca la factura como pagada y borra el duplicado del resumen, para no contar el gasto dos veces.
+      </div>
+
+      {sugerencias.length === 0 ? (
+        <EmptyState text="No hay coincidencias para revisar por ahora." />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {sugerencias.map(({ clave, pendiente, pago }) => (
+            <div key={clave} style={{ background: "#fff", borderRadius: 10, padding: 14, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "#fdf1de", borderRadius: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: GOLD, marginBottom: 2 }}>PENDIENTE</div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{pendiente.desc || pendiente.category}</div>
+                    <div style={{ fontSize: 11, color: "#8a9698" }}>{pendiente.date} · {pendiente.category}</div>
+                  </div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700 }}>{fmtARS(pendiente.amount)}</div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "#e8f0f0", borderRadius: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: TEAL, marginBottom: 2 }}>MOVIMIENTO ENCONTRADO</div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{pago.desc || pago.category}</div>
+                    <div style={{ fontSize: 11, color: "#8a9698" }}>{pago.date} · {pago.account || "sin cuenta"}</div>
+                  </div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700 }}>{fmtARS(pago.amount)}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={() => setDescartadas((prev) => [...prev, clave])}
+                  style={{ ...btnOutline, flex: 1, justifyContent: "center", fontSize: 12.5 }}
+                >
+                  No es la misma
+                </button>
+                <button
+                  onClick={() => handleConfirmar(clave, pendiente.id, pago.id)}
+                  disabled={confirmando === clave}
+                  style={{ ...btnPrimary, flex: 1, justifyContent: "center", fontSize: 12.5 }}
+                >
+                  {confirmando === clave ? "Confirmando..." : "Sí, es el mismo pago"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CuentasTab({ thisMonthEntries, monthLabel }) {
   const [expandedCuenta, setExpandedCuenta] = useState(null);
 
@@ -3422,6 +3557,104 @@ function CuentasTab({ thisMonthEntries, monthLabel }) {
               <div key={c.name} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "4px 0" }}>
                 <span>{c.name}</span>
                 <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: GREEN, fontWeight: 600 }}>{fmtARS(c.value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PersonasTab({ thisMonthEntries, monthLabel }) {
+  const [expandedPersona, setExpandedPersona] = useState(null);
+
+  const gastosPorPersona = useMemo(() => {
+    const map = {};
+    thisMonthEntries
+      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS")
+      .forEach((e) => {
+        const persona = (e.persona || e.who || "").trim() || "Sin nombre";
+        map[persona] = (map[persona] || 0) + Number(e.amount);
+      });
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [thisMonthEntries]);
+
+  const ingresosPorPersona = useMemo(() => {
+    const map = {};
+    thisMonthEntries
+      .filter((e) => e.type === "ingreso" || e.type === "cambio")
+      .forEach((e) => {
+        const persona = (e.persona || e.who || "").trim() || "Sin nombre";
+        map[persona] = (map[persona] || 0) + Number(e.amount);
+      });
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [thisMonthEntries]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ fontSize: 12.5, color: "#8a9698" }}>
+        Gastos e ingresos de {monthLabel}, agrupados por quién lo gastó realmente (no por quién lo cargó en la app) — se elige al cargar cada movimiento.
+      </div>
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Gastos por persona</div>
+        {gastosPorPersona.length === 0 ? <EmptyState text="Todavía no cargaste gastos este mes." /> : (
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ width: 180, height: 180 }}>
+              <ResponsiveContainer>
+                <PieChart>
+                  <Pie data={gastosPorPersona} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
+                    {gastosPorPersona.map((_, i) => <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip formatter={(v) => fmtARS(v)} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ flex: 1, minWidth: 160 }}>
+              {gastosPorPersona.map((p, i) => {
+                const isOpen = expandedPersona === `gasto-${p.name}`;
+                const movs = isOpen
+                  ? thisMonthEntries
+                      .filter((e) => e.type === "gasto" && (e.moneda || "ARS") === "ARS" && ((e.persona || e.who || "").trim() || "Sin nombre") === p.name)
+                      .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
+                  : [];
+                return (
+                  <div key={p.name}>
+                    <div
+                      onClick={() => setExpandedPersona(isOpen ? null : `gasto-${p.name}`)}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", cursor: "pointer" }}
+                    >
+                      <div style={{ width: 10, height: 10, borderRadius: "50%", background: CAT_COLORS[i % CAT_COLORS.length], flexShrink: 0 }} />
+                      <div style={{ flex: 1, fontSize: 13 }}>{p.name}</div>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 600 }}>{fmtARS(p.value)}</div>
+                    </div>
+                    {isOpen && (
+                      <div style={{ marginLeft: 18, marginBottom: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+                        {movs.map((m) => (
+                          <div key={m.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "#5a6b6d" }}>
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{m.desc || m.category}</span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(m.amount)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {ingresosPorPersona.length > 0 && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>Ingresos por persona</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {ingresosPorPersona.map((p) => (
+              <div key={p.name} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "4px 0" }}>
+                <span>{p.name}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: GREEN, fontWeight: 600 }}>{fmtARS(p.value)}</span>
               </div>
             ))}
           </div>
@@ -4370,7 +4603,7 @@ function FotoReciboModal({ onClose, onExtracted, categories }) {
           </>
         )}
 
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+        <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
       </div>
     </div>
   );
@@ -4502,7 +4735,7 @@ function VoiceEntryModal({ onClose, onExtracted, categories }) {
   );
 }
 
-function EntryForm({ onClose, onSave, saving, categories, initialData }) {
+function EntryForm({ onClose, onSave, saving, categories, initialData, profileName, miembrosHogar }) {
   const [type, setType] = useState(initialData?.type || "gasto");
   const [amount, setAmount] = useState(initialData?.amount != null ? String(initialData.amount) : "");
   const [category, setCategory] = useState(initialData?.category || categories[0]);
@@ -4513,6 +4746,8 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
   const [account, setAccount] = useState("");
   const [moneda, setMoneda] = useState("ARS");
   const [pagado, setPagado] = useState(initialData?.pagado !== undefined ? initialData.pagado : true);
+  const opcionesPersona = miembrosHogar && miembrosHogar.length > 0 ? miembrosHogar : [profileName].filter(Boolean);
+  const [persona, setPersona] = useState(initialData?.persona || profileName || opcionesPersona[0] || "");
 
   const cats = type === "gasto" ? categories : type === "ingreso" ? INGRESO_CATS : AHORRO_INSTR;
   const arsFromCambio = (Number(usdAmount) || 0) * (Number(rate) || 0);
@@ -4537,12 +4772,12 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
       if (!usdAmount || Number(usdAmount) <= 0 || !rate || Number(rate) <= 0) return;
       onSave({
         type: "cambio", category: "Cambio USD→ARS", amount: arsFromCambio,
-        usdAmount: Number(usdAmount), rate: Number(rate), desc, date, account
+        usdAmount: Number(usdAmount), rate: Number(rate), desc, date, account, persona
       });
       return;
     }
     if (!montoCalculado || montoCalculado <= 0) return;
-    onSave({ type, amount: montoCalculado, category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS", pagado: type === "gasto" ? pagado : true });
+    onSave({ type, amount: montoCalculado, category, desc, date, account, moneda: type === "gasto" || type === "ingreso" ? moneda : "ARS", pagado: type === "gasto" ? pagado : true, persona });
   }
 
   return (
@@ -4640,6 +4875,21 @@ function EntryForm({ onClose, onSave, saving, categories, initialData }) {
 
         <label style={labelStyle}>Descripción (opcional)</label>
         <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Ej: supermercado del sábado" style={{ ...inputStyle, marginBottom: 14 }} />
+
+        {opcionesPersona.length > 1 && (
+          <>
+            <label style={labelStyle}>¿Quién lo gastó?</label>
+            <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+              {opcionesPersona.map((nombre) => (
+                <button key={nombre} onClick={() => setPersona(nombre)} style={{
+                  padding: "8px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                  border: `1.5px solid ${persona === nombre ? TEAL : "#ddd6c4"}`,
+                  background: persona === nombre ? TEAL : "#fff", color: persona === nombre ? "#fff" : INK,
+                }}>{nombre}</button>
+              ))}
+            </div>
+          </>
+        )}
 
         {type === "gasto" && (
           <>
