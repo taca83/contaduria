@@ -7,7 +7,7 @@ import {
 import {
   Wallet, TrendingUp, TrendingDown, PiggyBank, Target, Plus, X,
   ArrowUpRight, ArrowDownRight, ArrowLeft, ArrowLeftRight, Landmark, Settings, Trash2, User, Download, Menu,
-  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera, Clock, Tag, Copy, History, LogOut, Eye, EyeOff
+  Home, List, Upload, Pencil, Check, Mic, Square, Zap, Camera, Clock, Tag, Copy, History, LogOut
 } from "lucide-react";
 
 const DEFAULT_GASTO_CATS = ["Comida", "Tarjetas", "Ropa", "Salud", "Educación", "Transporte", "Ocio", "Servicios", "Vivienda", "Otros"];
@@ -64,10 +64,23 @@ function clasificarMedioPago(cuenta) {
   return "Otros medios de pago";
 }
 
+// Etiqueta de tarjeta + titular, para separar "VISA Negro" de "VISA
+// Nati" cuando ambos son adicionales de la misma cuenta BBVA. Usa el
+// campo persona (que el parser de BBVA completa con el nombre real que
+// trae el PDF); si un movimiento viejo no lo tiene, cae de respaldo al
+// "(Natalia)" que se agregaba antes al final de la descripción.
+function etiquetaTarjeta(entry) {
+  const cuenta = (entry.account || "").trim() || "Sin cuenta especificada";
+  const esNatalia = entry.persona
+    ? /natalia/i.test(entry.persona)
+    : /\(Natalia\)\s*$/.test(entry.desc || "");
+  return esNatalia ? `${cuenta} · Natalia` : cuenta;
+}
+
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v105 · 2026-08-03 · fix: la fecha de las cuotas ya no depende únicamente del encabezado del PDF — si "Cierre actual" no se pudo leer, se calcula sola con el consumo sin cuota más reciente del propio resumen (nunca más se quedan con la fecha vieja de la compra original)
-const APP_VERSION = "v105 · 2026-08-03";
+// v109 · 2026-08-06 · el parser de BBVA ahora asigna "persona" (Hernán/Natalia) directo desde el nombre real que trae el PDF, en vez de inferirlo solo de la descripción; el desglose por tarjeta usa ese campo. Además, "Evolución" en el celu ya no amontona los nombres de los meses en 12M/24M/Todo (se saltean etiquetas según el ancho disponible)
+const APP_VERSION = "v109 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -248,24 +261,14 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   const cuentaMatch = lineas.find((l) => /Visa Signature|Mastercard Black/i.test(l));
   const cuenta = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
 
-  // Fecha de cierre del ciclo actual, leída del encabezado — la usamos
-  // para las cuotas (ver más abajo) y como respaldo de fecha del "Total a
-  // pagar". Si no se encuentra acá, más abajo hay un respaldo adicional.
-  const textoCompletoTmp = lineas.join("\n");
-  const cierreMatchTmp = textoCompletoTmp.match(/CIERRE ACTUAL[\s\S]{0,60}?(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
-  const fechaCierreHeader = cierreMatchTmp ? fechaBbvaAIso(cierreMatchTmp[1], cierreMatchTmp[2], cierreMatchTmp[3]) : null;
-
   let seccionActual = null; // "Hernan Israel" | "Natalia Wajsman" | null
   let enSeccionPagos = false;
+  // Suma de los consumos itemizados que sí pudimos leer línea por línea —
+  // sirve para no volver a contarlos dentro del "Total a pagar" del
+  // resumen (ver más abajo: ese total ya los incluye).
+  let sumaConsumosPeriodo = 0;
+  const LINEA_MOV = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+(.+?)\s+(\d{6})\s+(-?[\d.,]+)\s*$/;
   const LINEA_PAGO = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+SU PAGO EN PESOS\s+(-?[\d.,]+)\s*$/i;
-  // Un movimiento completo: fecha, descripción, cupón de 6 dígitos, monto.
-  // Se corre sobre el BLOQUE entero de la sección (no línea por línea),
-  // porque a veces el lector de PDF separa la marca de cuota "C.XX/YY" en
-  // una línea aparte por una diferencia mínima de posición vertical —
-  // uniendo todo el bloque, eso ya no importa.
-  const BLOQUE_MOV = /(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+(.+?)\s+(\d{6})\s+(-?[\d.,]+,\d{2})(?=\s+\d{2}-[A-Za-zÁÉÍÓÚáéíóú]{3}-\d{2}\s|\s*$)/g;
-
-  const bloquePorSeccion = { "Hernan Israel": [], "Natalia Wajsman": [] };
 
   lineas.forEach((linea) => {
     if (/^Sus pagos y ajustes realizados/i.test(linea)) { enSeccionPagos = true; return; }
@@ -273,24 +276,13 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       // "SU PAGO EN USD" y cualquier otra línea que no sea "SU PAGO EN
       // PESOS" no nos interesan acá (ya se maneja el USD aparte, y otros
       // ajustes son casos borde poco frecuentes).
-      const pago = linea.match(LINEA_PAGO);
-      if (pago) {
-        const [, dd, mmm, yy, montoRaw] = pago;
-        const fecha = fechaBbvaAIso(dd, mmm, yy);
-        const monto = Math.abs(Number(montoRaw.replace(/\./g, "").replace(",", ".")));
-        if (fecha && monto > 0) {
-          filas.push({
-            date: fecha,
-            type: "gasto",
-            category: "Tarjetas",
-            amount: monto,
-            desc: `Pago de tarjeta ${cuenta} (SU PAGO EN PESOS)`,
-            account: cuenta,
-            origen: "pdf_bbva",
-            pagado: true, // esto ES el pago real — no es una deuda pendiente
-          });
-        }
-      }
+      // OJO: "SU PAGO EN PESOS" es el pago que ya hiciste del resumen
+      // ANTERIOR (el que trae itemizados sus propios consumos + su
+      // diferencia de impuestos/tasas, cargados cuando procesamos ESE
+      // PDF). No la volvemos a cargar como gasto nuevo acá — si lo
+      // hiciéramos, estaríamos sumando la misma plata una tercera vez.
+      // No hace falta "avisar" nada: no es un error, es plata que ya
+      // está contabilizada en el mes en que se gastó.
       if (/^Consumos\s+(Hernan Israel|Natalia Wajsman)/i.test(linea)) {
         enSeccionPagos = false;
         seccionActual = /Natalia/i.test(linea) ? "Natalia Wajsman" : "Hernan Israel";
@@ -308,95 +300,43 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       // igual que venimos haciendo a mano, porque no es deuda en pesos.
       return;
     }
-    bloquePorSeccion[seccionActual].push(linea);
-  });
-
-  // Primera pasada: extraemos TODOS los movimientos crudos (sin aplicar
-  // todavía la corrección de fecha de las cuotas), para poder calcular la
-  // fecha del ciclo actual con un respaldo confiable si el encabezado
-  // falla (ver más abajo).
-  const crudosPorSeccion = {};
-  Object.entries(bloquePorSeccion).forEach(([persona, lineasSeccion]) => {
-    crudosPorSeccion[persona] = [];
-    if (lineasSeccion.length === 0) return;
-    const texto = lineasSeccion.join(" ").replace(/\s+/g, " ");
-    let m;
-    while ((m = BLOQUE_MOV.exec(texto))) {
-      const [, dd, mmm, yy, descRaw, , montoRaw] = m;
-      const fecha = fechaBbvaAIso(dd, mmm, yy);
-      if (!fecha) { avisos.push(`No pude leer la fecha en: "${m[0]}"`); continue; }
-      const monto = Number(montoRaw.replace(/\./g, "").replace(",", "."));
-      if (!monto) continue;
-      const cuotaMatch = descRaw.match(/\s*C\.(\d{2})\/(\d{2})\s*$/);
-      crudosPorSeccion[persona].push({ fecha, descRaw, monto, cuotaMatch });
-    }
-  });
-
-  // Fecha del ciclo actual: primero probamos leerla del encabezado
-  // ("CIERRE ACTUAL"). Si el lector de PDF la partió de una forma que no
-  // pudimos reconstruir, la calculamos igual: es la fecha MÁS RECIENTE
-  // entre los consumos que NO son cuota (esos sí guardan su fecha real de
-  // este ciclo, a diferencia de las cuotas que arrastran la fecha de la
-  // compra original).
-  let fechaCierre = fechaCierreHeader;
-  if (!fechaCierre) {
-    const fechasNoCuota = Object.values(crudosPorSeccion)
-      .flat()
-      .filter((c) => !c.cuotaMatch)
-      .map((c) => c.fecha);
-    if (fechasNoCuota.length > 0) {
-      fechaCierre = fechasNoCuota.sort().at(-1);
-      avisos.push(`No encontré "Cierre actual" en el encabezado de ${cuenta} — para las cuotas usé la fecha del consumo más reciente del resumen (${fechaCierre}) en su lugar. Revisá que quede bien.`);
-    }
-  }
-
-  Object.entries(crudosPorSeccion).forEach(([persona, movs]) => {
-    movs.forEach(({ fecha, descRaw, monto, cuotaMatch }) => {
-      let desc = descRaw.trim();
-      let fechaFinal = fecha;
-      if (cuotaMatch) {
-        const actual = Number(cuotaMatch[1]);
-        const total = Number(cuotaMatch[2]);
-        const quedan = total - actual;
-        desc = descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, "").trim();
-        desc += ` (cuota ${actual}/${total}${quedan > 0 ? ` — quedan ${quedan}` : " — última"})`;
-        // La fecha que trae el PDF en una cuota es la de la COMPRA
-        // original, no la de este cobro — para que el gasto caiga en el
-        // mes correcto (el de este resumen), usamos la fecha de cierre
-        // del ciclo actual en vez de esa fecha vieja.
-        if (fechaCierre) fechaFinal = fechaCierre;
-      }
-
-      filas.push({
-        date: fechaFinal,
-        type: "gasto",
-        category: inferCategory(desc, overrides),
-        amount: monto,
-        desc: persona === "Natalia Wajsman" ? `${desc} (Natalia)` : desc,
-        account: cuenta,
-        origen: "pdf_bbva",
-      });
+    const m = linea.match(LINEA_MOV);
+    if (!m) return;
+    const [, dd, mmm, yy, descRaw, , montoRaw] = m;
+    const fecha = fechaBbvaAIso(dd, mmm, yy);
+    if (!fecha) { avisos.push(`No pude leer la fecha en: "${linea}"`); return; }
+    const monto = Number(montoRaw.replace(/\./g, "").replace(",", "."));
+    if (!monto) return;
+    sumaConsumosPeriodo += monto;
+    const desc = descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, (s) => ` (cuota${s.trim().replace("C.", " ")})`).trim();
+    const persona = seccionActual === "Natalia Wajsman" ? "Natalia" : "Hernán";
+    filas.push({
+      date: fecha,
+      type: "gasto",
+      category: inferCategory(desc, overrides),
+      amount: monto,
+      desc: persona === "Natalia" ? `${desc} (Natalia)` : desc,
+      account: cuenta,
+      persona,
+      origen: "pdf_bbva",
     });
   });
 
-  // Además de los consumos, agregamos el "Total a pagar" del resumen en sí
-  // (lo que hay que transferir/debitar para cancelar la tarjeta) — se carga
-  // como Pendiente, y se marca Pagado más adelante (a mano, o vía
-  // Conciliar pagos cuando aparezca el pago real en otro resumen).
+  // El "Total a pagar" del resumen YA INCLUYE los consumos itemizados que
+  // acabamos de cargar arriba (sumaConsumosPeriodo) más impuestos, tasas
+  // e intereses que no vienen desglosados línea por línea. Si cargáramos
+  // el total completo de nuevo, estaríamos contando esa plata dos veces.
+  // Por eso acá solo agregamos la DIFERENCIA (impuestos/tasas/intereses),
+  // fechada al vencimiento — así julio suma sus consumos reales y agosto
+  // suma solo el cargo adicional del resumen, y entre los dos dan el
+  // total real de la tarjeta sin duplicar nada.
   const textoCompleto = lineas.join("\n");
-  // El monto correcto es SIEMPRE "SALDO ACTUAL $" (la deuda total real de
-  // la tarjeta) — la línea "...LA SUMA DE $" del final del resumen NO
-  // sirve como fuente principal: si la cuenta tiene un plan de cuotas
-  // (ej. "Plan V"), esa línea puede reflejar solo el PAGO MÍNIMO que se
-  // debita automático, no el total adeudado. Esto ya causó un bug real.
-  const totalMatch =
-    textoCompleto.match(/SALDO ACTUAL\s*\$\s*\n?\s*([\d.]+,\d{2})/i) ||
-    textoCompleto.match(/SALDO ACTUAL\s+([\d.]+,\d{2})/i);
+  const totalMatch = textoCompleto.match(/LA SUMA DE\s*\$\s*([\d.]+,\d{2})/i);
   const sobreMatch = textoCompleto.match(/Sobre\s*\((\d+)\)/i);
   if (totalMatch) {
     const totalAPagar = Number(totalMatch[1].replace(/\./g, "").replace(",", "."));
-    const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL[\s\S]{0,60}?(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
-    const cierreMatch = textoCompleto.match(/CIERRE ACTUAL[\s\S]{0,60}?(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+    const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+    const cierreMatch = textoCompleto.match(/CIERRE ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
 
     // Cadena de respaldo para la fecha — NUNCA cae en "hoy" (eso mandaría
     // un resumen de diciembre a la fecha real en la que lo importás, un
@@ -419,23 +359,42 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
     }
 
     if (totalAPagar > 0 && fechaVenc) {
-      const notaFecha = vencMatch
-        ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})`
-        : cierreMatch
-          ? ` (cierre ${cierreMatch[1]}-${cierreMatch[2]}-${cierreMatch[3]}, no encontré el vencimiento)`
-          : "";
-      filas.push({
-        date: fechaVenc,
-        type: "gasto",
-        category: "Tarjetas",
-        amount: totalAPagar,
-        desc: `Total a pagar — resumen ${cuenta}${notaFecha}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
-        account: cuenta,
-        origen: "pdf_bbva",
-        pagado: false,
-      });
+      const diferencia = Math.round((totalAPagar - sumaConsumosPeriodo) * 100) / 100;
+
+      if (sumaConsumosPeriodo <= 0) {
+        // No pudimos leer ningún consumo itemizado de este resumen (por
+        // ejemplo, un formato de PDF distinto al esperado) — en ese caso
+        // no hay riesgo de duplicar nada, así que cargamos el total
+        // completo como antes, marcado Pendiente para que se revise.
+        filas.push({
+          date: fechaVenc,
+          type: "gasto",
+          category: "Tarjetas",
+          amount: totalAPagar,
+          desc: `Total a pagar — resumen ${cuenta}${vencMatch ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})` : ""}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
+          account: cuenta,
+          origen: "pdf_bbva",
+          pagado: false,
+        });
+        avisos.push(`No pude leer los consumos itemizados de ${cuenta} en este resumen, así que cargué el "Total a pagar" completo (${fmtARS(totalAPagar)}) sin desglosar — revisalo a mano.`);
+      } else if (diferencia > 1) {
+        filas.push({
+          date: fechaVenc,
+          type: "gasto",
+          category: "Tarjetas",
+          amount: diferencia,
+          desc: `Impuestos, tasas e intereses — resumen ${cuenta}${vencMatch ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})` : ""}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
+          account: cuenta,
+          origen: "pdf_bbva",
+          pagado: true,
+        });
+      } else if (diferencia < -1) {
+        avisos.push(`El "Total a pagar" de ${cuenta} (${fmtARS(totalAPagar)}) da MENOR que la suma de los consumos itemizados (${fmtARS(sumaConsumosPeriodo)}) — no cargué ningún ajuste, revisá el resumen a mano (puede haber un pago parcial o descuento que no estoy contemplando).`);
+      }
+      // Si la diferencia está entre -1 y 1 no hacemos nada (es solo redondeo).
+
       if (origenFecha !== "vencimiento") {
-        avisos.push(`El "Total a pagar" de ${cuenta} quedó fechado por ${origenFecha} (no encontré el vencimiento) — revisá que la fecha sea la correcta.`);
+        avisos.push(`La fecha del ajuste de "${cuenta}" quedó tomada por ${origenFecha} (no encontré el vencimiento) — revisá que la fecha sea la correcta.`);
       }
     } else if (totalAPagar > 0) {
       avisos.push(`No pude leer ninguna fecha confiable para el "Total a pagar" de ${cuenta} — no lo agregué. Cargalo a mano si hace falta.`);
@@ -1053,48 +1012,9 @@ export default function FinanzasApp() {
   }
 
   // --- pantalla de login/registro ---
+  const [authMode, setAuthMode] = useState("login"); // "login" | "signup" | "onboarding"
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [recoverAccessToken, setRecoverAccessToken] = useState(() => {
-    // Detección del link de recuperación ANTES del primer render (no en un
-    // useEffect), para que la pantalla de "nueva contraseña" aparezca de
-    // una y ningún otro efecto alcance a redirigir a login en el medio.
-    try {
-      const rawHash = window.location.hash.replace(/^#/, "");
-      const rawQuery = window.location.search.replace(/^\?/, "");
-      // El token puede venir en el hash (#access_token=...) o, según config,
-      // en el query (?access_token=...). Probamos los dos.
-      for (const raw of [rawHash, rawQuery]) {
-        if (!raw) continue;
-        const params = new URLSearchParams(raw);
-        if (params.get("type") === "recovery" && params.get("access_token")) {
-          return params.get("access_token");
-        }
-      }
-    } catch {}
-    return null;
-  });
-  const [recoverNewPassword, setRecoverNewPassword] = useState("");
-  const [recoverMsg, setRecoverMsg] = useState(null);
-
-  // Si detectamos el token de recuperación (arriba), arrancamos ya en la
-  // pantalla "reset" y limpiamos la URL para que no quede el token a la vista.
-  const [authMode, setAuthMode] = useState(() => {
-    try {
-      for (const raw of [window.location.hash.replace(/^#/, ""), window.location.search.replace(/^\?/, "")]) {
-        if (!raw) continue;
-        const params = new URLSearchParams(raw);
-        if (params.get("type") === "recovery" && params.get("access_token")) return "reset";
-      }
-    } catch {}
-    return "login";
-  });
-  useEffect(() => {
-    if (authMode === "reset") {
-      try { window.history.replaceState(null, "", window.location.pathname); } catch {}
-    }
-  }, []);
   const [authDisplayName, setAuthDisplayName] = useState("");
   const [authInviteCode, setAuthInviteCode] = useState(() => {
     try {
@@ -1281,52 +1201,6 @@ export default function FinanzasApp() {
       setSession(data);
       await cargarHogarYDatos(data.access_token);
       setDesbloqueado(true);
-    } catch (e) {
-      setAuthError(e.message);
-    }
-    setAuthBusy(false);
-  }
-
-  // Manda el mail de "recuperar contraseña" (Supabase se encarga de
-  // enviarlo — no hace falta ninguna Edge Function propia para esto).
-  async function handleForgotPassword() {
-    setAuthError(null);
-    setRecoverMsg(null);
-    if (!authEmail.trim()) { setAuthError("Escribí tu email primero."); return; }
-    setAuthBusy(true);
-    try {
-      await sbAuth("recover", {
-        method: "POST",
-        body: JSON.stringify({ email: authEmail.trim(), options: { redirectTo: window.location.origin } }),
-      });
-      setRecoverMsg(`Te mandamos un mail a ${authEmail.trim()} con el link para elegir una contraseña nueva.`);
-    } catch (e) {
-      // Por seguridad, Supabase a veces no distingue "no existe" de "error real"
-      // — igual mostramos el mensaje que haya devuelto.
-      setAuthError(e.message);
-    }
-    setAuthBusy(false);
-  }
-
-  // Confirma la nueva contraseña usando el token que vino en el link del mail.
-  async function handleResetPassword() {
-    setAuthError(null);
-    if (!recoverNewPassword || recoverNewPassword.length < 6) {
-      setAuthError("La contraseña tiene que tener al menos 6 caracteres.");
-      return;
-    }
-    setAuthBusy(true);
-    try {
-      await sbAuth("user", {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${recoverAccessToken}` },
-        body: JSON.stringify({ password: recoverNewPassword }),
-      });
-      setRecoverMsg("Listo, tu contraseña quedó actualizada. Iniciá sesión con la nueva.");
-      setAuthMode("login");
-      setRecoverAccessToken(null);
-      setRecoverNewPassword("");
-      setAuthPassword("");
     } catch (e) {
       setAuthError(e.message);
     }
@@ -1833,43 +1707,6 @@ export default function FinanzasApp() {
   // igual del lado del servidor cuando se pide el contenido.
   const menuTabs = esAdmin ? [...SECONDARY_TABS, "admin"] : SECONDARY_TABS;
 
-  // La pantalla de "elegí tu nueva contraseña" tiene prioridad sobre todo
-  // lo demás: si venís del link del mail, no importa si hay una sesión
-  // vieja guardada ni si los datos están cargando — mostramos esto primero.
-  if (authMode === "reset") {
-    return (
-      <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
-        <style>{fontImports}</style>
-        <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 400, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
-          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: INK, marginBottom: 6 }}>Elegí tu nueva contraseña</div>
-          <label style={labelStyle}>Contraseña nueva</label>
-          <div style={{ position: "relative", marginBottom: 14 }}>
-            <input
-              type={showPassword ? "text" : "password"}
-              value={recoverNewPassword}
-              onChange={(e) => setRecoverNewPassword(e.target.value)}
-              placeholder="Al menos 6 caracteres"
-              style={{ ...inputStyle, paddingRight: 40 }}
-            />
-            <button
-              onClick={() => setShowPassword((v) => !v)}
-              type="button"
-              aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-              style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "#8a9698", display: "flex" }}
-            >
-              {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
-            </button>
-          </div>
-          {authError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 12 }}>{authError}</div>}
-          {recoverMsg && <div style={{ color: GREEN, fontSize: 12.5, marginBottom: 12 }}>{recoverMsg}</div>}
-          <button onClick={handleResetPassword} disabled={authBusy} style={{ ...btnPrimary, width: "100%", justifyContent: "center" }}>
-            {authBusy ? "Guardando..." : "Guardar contraseña nueva"}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   if (loading) {
     return (
       <div style={{ minHeight: "100vh", background: PAPER, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Inter, sans-serif", color: INK }}>
@@ -1941,35 +1778,6 @@ export default function FinanzasApp() {
       );
     }
 
-    // --- Recuperar contraseña: pedir el mail ---
-    if (authMode === "recover") {
-      return (
-        <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
-          <style>{fontImports}</style>
-          <div style={{ background: PAPER, borderRadius: 4, padding: "40px 32px", maxWidth: 400, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
-            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 600, color: INK, marginBottom: 6 }}>Recuperar contraseña</div>
-            <div style={{ color: "#5a6b6d", fontSize: 13.5, marginBottom: 20 }}>
-              Escribí el email de tu cuenta y te mandamos un link para elegir una contraseña nueva.
-            </div>
-            <label style={labelStyle}>Email</label>
-            <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="vos@ejemplo.com" style={{ ...inputStyle, marginBottom: 14 }} />
-            {authError && <div style={{ color: BRICK, fontSize: 12.5, marginBottom: 12 }}>{authError}</div>}
-            {recoverMsg && <div style={{ color: GREEN, fontSize: 12.5, marginBottom: 12 }}>{recoverMsg}</div>}
-            <button onClick={handleForgotPassword} disabled={authBusy} style={{ ...btnPrimary, width: "100%", justifyContent: "center", marginBottom: 12 }}>
-              {authBusy ? "Enviando..." : "Mandar link de recuperación"}
-            </button>
-            <button
-              onClick={() => { setAuthMode("login"); setAuthError(null); setRecoverMsg(null); }}
-              style={{ background: "none", border: "none", color: TEAL, fontSize: 13, cursor: "pointer", width: "100%" }}
-            >
-              Volver a iniciar sesión
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    // --- Recuperar contraseña: llegó desde el link del mail, elige la nueva ---
     // --- Login / registro ---
     return (
       <div style={{ minHeight: "100vh", background: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "Inter, sans-serif" }}>
@@ -1983,34 +1791,7 @@ export default function FinanzasApp() {
           <label style={labelStyle}>Email</label>
           <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="vos@ejemplo.com" style={{ ...inputStyle, marginBottom: 14 }} />
           <label style={labelStyle}>Contraseña</label>
-          <div style={{ position: "relative", marginBottom: authMode === "signup" ? 14 : 6 }}>
-            <input
-              type={showPassword ? "text" : "password"}
-              value={authPassword}
-              onChange={(e) => setAuthPassword(e.target.value)}
-              placeholder="••••••••"
-              style={{ ...inputStyle, paddingRight: 40 }}
-            />
-            <button
-              onClick={() => setShowPassword((v) => !v)}
-              type="button"
-              aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
-              style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "#8a9698", display: "flex" }}
-            >
-              {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
-            </button>
-          </div>
-          {authMode !== "signup" && (
-            <div style={{ textAlign: "right", marginBottom: 14 }}>
-              <button
-                onClick={() => { setAuthMode("recover"); setAuthError(null); setRecoverMsg(null); }}
-                type="button"
-                style={{ background: "none", border: "none", color: TEAL, fontSize: 12, cursor: "pointer", padding: 0 }}
-              >
-                ¿Olvidaste tu contraseña?
-              </button>
-            </div>
-          )}
+          <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} placeholder="••••••••" style={{ ...inputStyle, marginBottom: 14 }} />
 
           {authMode === "signup" && (
             <>
@@ -2828,7 +2609,13 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
     const label = d.toLocaleDateString("es-AR", { month: "short", year: "2-digit" });
     const ing = entries.filter((e) => (e.type === "ingreso" || e.type === "cambio") && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
     const gas = entries.filter((e) => e.type === "gasto" && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
-    return { mes: label, Ingresos: ing, Gastos: gas };
+    // Solo tarjetas de crédito (BBVA Visa, Mastercard Black, etc.) — no
+    // incluye Efectivo, Mercado Pago ni ARQ, para responder puntualmente
+    // "cuánto gasté de tarjeta este mes".
+    const tarj = entries
+      .filter((e) => e.type === "gasto" && monthKey(e.date) === key && clasificarMedioPago(e.account) === "Tarjetas de crédito")
+      .reduce((s, e) => s + Number(e.amount), 0);
+    return { mes: label, Ingresos: ing, Gastos: gas, Tarjetas: tarj };
   }
 
   // Siempre el último año hasta el mes actual (nunca meses futuros, aunque
@@ -2873,7 +2660,10 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
       const label = d.toLocaleDateString("es-AR", { month: "short", year: mesesAMostrar > 12 ? "2-digit" : undefined });
       const ing = entries.filter((e) => (e.type === "ingreso" || e.type === "cambio") && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
       const gas = entries.filter((e) => e.type === "gasto" && monthKey(e.date) === key).reduce((s, e) => s + Number(e.amount), 0);
-      months.push({ mes: label, Ingresos: ing, Gastos: gas });
+      const tarj = entries
+        .filter((e) => e.type === "gasto" && monthKey(e.date) === key && clasificarMedioPago(e.account) === "Tarjetas de crédito")
+        .reduce((s, e) => s + Number(e.amount), 0);
+      months.push({ mes: label, Ingresos: ing, Gastos: gas, Tarjetas: tarj });
     }
     return months;
   }, [entries, rango, compareMode, comparedMonths]);
@@ -2881,6 +2671,67 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   function toggleMesComparado(key) {
     setComparedMonths((prev) => prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]);
   }
+
+  // Cuántas etiquetas de mes entran cómodas en el eje X del gráfico de
+  // "Evolución" antes de amontonarse — bastante menos en el celu (pantalla
+  // angosta) que en escritorio. Con más meses que ese máximo, salteamos
+  // etiquetas parejo para no superponer texto.
+  const xAxisInterval = useMemo(() => {
+    const maxEtiquetas = isDesktop ? 12 : 6;
+    return chartData.length > maxEtiquetas ? Math.ceil(chartData.length / maxEtiquetas) - 1 : 0;
+  }, [chartData.length, isDesktop]);
+
+  // Lista de tarjetas/titulares distintos que aparecen en el historial
+  // (ej. "Visa BBVA Hernán", "Visa BBVA Hernán · Natalia", "Mastercard
+  // Black"), ordenadas de mayor a menor gasto histórico — define las
+  // columnas de la tabla de desglose de abajo.
+  const cuentasTarjetaLabels = useMemo(() => {
+    const map = {};
+    entries.forEach((e) => {
+      if (e.type !== "gasto" || (e.moneda || "ARS") !== "ARS" || clasificarMedioPago(e.account) !== "Tarjetas de crédito") return;
+      const label = etiquetaTarjeta(e);
+      map[label] = (map[label] || 0) + Number(e.amount);
+    });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]).map(([label]) => label);
+  }, [entries]);
+
+  // Mismo rango de meses que "Evolución"/"Resumen mensual" de arriba,
+  // pero con el gasto de cada mes abierto por tarjeta/titular en vez de
+  // sumado en un solo total.
+  const chartDataTarjetasPorCuenta = useMemo(() => {
+    function calcularMesPorCuenta(key) {
+      const [y, m] = key.split("-").map(Number);
+      const d = new Date(y, m - 1, 1);
+      const label = d.toLocaleDateString("es-AR", { month: "short", year: "2-digit" });
+      const fila = { mes: label };
+      cuentasTarjetaLabels.forEach((c) => { fila[c] = 0; });
+      entries.forEach((e) => {
+        if (e.type !== "gasto" || (e.moneda || "ARS") !== "ARS" || monthKey(e.date) !== key || clasificarMedioPago(e.account) !== "Tarjetas de crédito") return;
+        const label2 = etiquetaTarjeta(e);
+        fila[label2] = (fila[label2] || 0) + Number(e.amount);
+      });
+      return fila;
+    }
+    if (compareMode) {
+      return [...comparedMonths].sort().map(calcularMesPorCuenta);
+    }
+    const now = new Date();
+    let mesesAMostrar = rango;
+    if (rango === "todo") {
+      const fechas = entries.map((e) => e.date).filter(Boolean).sort();
+      if (fechas.length === 0) return [];
+      const primera = new Date(fechas[0] + "-01");
+      mesesAMostrar = (now.getFullYear() - primera.getFullYear()) * 12 + (now.getMonth() - primera.getMonth()) + 1;
+      mesesAMostrar = Math.min(mesesAMostrar, 60);
+    }
+    const months = [];
+    for (let i = mesesAMostrar - 1; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = d.toISOString().slice(0, 7);
+      months.push(calcularMesPorCuenta(key));
+    }
+    return months;
+  }, [entries, rango, compareMode, comparedMonths, cuentasTarjetaLabels]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -3101,7 +2952,7 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
             <ResponsiveContainer>
               <BarChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eee6d5" vertical={false} />
-                <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} interval={chartData.length > 12 ? 1 : 0} />
+                <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} interval={xAxisInterval} />
                 <YAxis tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} width={40} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
                 <Tooltip formatter={(v) => fmtARS(v)} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -3139,6 +2990,7 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
               <div style={{ flex: 1.2 }}>Mes</div>
               <div style={{ flex: 1, textAlign: "right" }}>Ingresos</div>
               <div style={{ flex: 1, textAlign: "right" }}>Gastos</div>
+              <div style={{ flex: 1, textAlign: "right" }}>Tarjetas</div>
               <div style={{ flex: 1, textAlign: "right" }}>Balance</div>
             </div>
             {[...chartData].reverse().map((m, i) => {
@@ -3148,6 +3000,7 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
                   <div style={{ flex: 1.2, fontWeight: 600 }}>{m.mes}</div>
                   <div style={{ flex: 1, textAlign: "right", color: GREEN, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Ingresos)}</div>
                   <div style={{ flex: 1, textAlign: "right", color: BRICK, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Gastos)}</div>
+                  <div style={{ flex: 1, textAlign: "right", color: GOLD, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Tarjetas)}</div>
                   <div style={{ flex: 1, textAlign: "right", fontWeight: 700, color: bal >= 0 ? GREEN : BRICK, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(bal)}</div>
                 </div>
               );
@@ -3171,6 +3024,10 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
                     <span style={{ color: "#8a9698" }}>Gastos</span>
                     <span style={{ color: BRICK, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Gastos)}</span>
                   </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
+                    <span style={{ color: "#8a9698" }}>Tarjetas</span>
+                    <span style={{ color: GOLD, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m.Tarjetas)}</span>
+                  </div>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, paddingTop: 5, marginTop: 3, borderTop: "1px dashed #eee6d5" }}>
                     <span style={{ fontWeight: 700 }}>Balance</span>
                     <span style={{ fontWeight: 700, color: bal >= 0 ? GREEN : BRICK, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(bal)}</span>
@@ -3178,6 +3035,51 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
                 </div>
               );
             })}
+          </div>
+        )}
+      </div>
+
+      <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 4 }}>Gasto por tarjeta, mes a mes</div>
+        <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 12 }}>
+          Cada tarjeta por separado (no sumadas) — y, dentro de una misma tarjeta compartida, separado también por titular cuando el resumen lo distingue. Usa el mismo rango elegido arriba en "Evolución".
+        </div>
+        {cuentasTarjetaLabels.length === 0 ? (
+          <EmptyState text="Todavía no hay gastos de tarjeta cargados." />
+        ) : isDesktop ? (
+          <div style={{ overflowX: "auto" }}>
+            <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", paddingBottom: 8, borderBottom: "1px solid #eee6d5", minWidth: 160 + cuentasTarjetaLabels.length * 130 }}>
+              <div style={{ flex: "0 0 120px" }}>Mes</div>
+              {cuentasTarjetaLabels.map((c) => (
+                <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>{c}</div>
+              ))}
+            </div>
+            {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => (
+              <div key={i} style={{ display: "flex", padding: "8px 0", borderBottom: "1px solid #f2eee2", fontSize: 12.5, alignItems: "center", minWidth: 160 + cuentasTarjetaLabels.length * 130 }}>
+                <div style={{ flex: "0 0 120px", fontWeight: 600 }}>{m.mes}</div>
+                {cuentasTarjetaLabels.map((c) => (
+                  <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", color: m[c] > 0 ? INK : "#ccc4ae" }}>
+                    {m[c] > 0 ? fmtARS(m[c]) : "—"}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => (
+              <div key={i} style={{ border: "1px solid #f2eee2", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, textTransform: "capitalize" }}>{m.mes}</div>
+                {cuentasTarjetaLabels.filter((c) => m[c] > 0).length === 0 ? (
+                  <div style={{ fontSize: 12, color: "#8a9698" }}>Sin gastos de tarjeta este mes.</div>
+                ) : cuentasTarjetaLabels.filter((c) => m[c] > 0).map((c) => (
+                  <div key={c} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
+                    <span style={{ color: "#8a9698" }}>{c}</span>
+                    <span style={{ color: GOLD, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m[c])}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -6041,5 +5943,4 @@ const btnOutline = { background: "#fff", color: INK, border: `1.5px solid #ddd6c
 
 const fontImports = `
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
-* { box-sizing: border-box; }
 `;
