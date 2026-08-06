@@ -79,8 +79,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v109 · 2026-08-06 · el parser de BBVA ahora asigna "persona" (Hernán/Natalia) directo desde el nombre real que trae el PDF, en vez de inferirlo solo de la descripción; el desglose por tarjeta usa ese campo. Además, "Evolución" en el celu ya no amontona los nombres de los meses en 12M/24M/Todo (se saltean etiquetas según el ancho disponible)
-const APP_VERSION = "v109 · 2026-08-06";
+// v110 · 2026-08-06 · TRES bugs reales del parser de BBVA, encontrados y corregidos probando contra un PDF real que fallaba: (1) el agrupador de líneas de pdf.js usaba Y exacto y perdía filas cuando el importe caía 1pt off del resto de la línea (perdía >60% de los consumos); ahora agrupa por cercanía; (2) el total del resumen se detectaba con "LA SUMA DE $", que en el formato "Consolidado" nuevo es el PAGO MÍNIMO auto-debitado, no el saldo real — ahora usa "SALDO ACTUAL" como fuente principal; (3) la fecha de vencimiento no se encontraba en resúmenes donde título y valor quedan en líneas separadas — se agregó un escaneo de la fila de encabezado como respaldo
+const APP_VERSION = "v110 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -230,23 +230,48 @@ function conTimeout(promise, ms, mensaje) {
 
 // Reconstruye líneas de texto a partir de los items posicionados que
 // devuelve pdf.js (que por sí solo no separa por renglones).
+//
+// OJO: no agrupamos por Y exacto (Math.round) — en algunos resúmenes de
+// BBVA el importe de una fila se renderiza 1pt más arriba o abajo que el
+// resto de la línea (fecha/descripción/cupón), así que dos ítems del
+// MISMO renglón pueden caer en dos "buckets" redondeados distintos y
+// separarse en dos líneas — perdiendo el importe (bug real, visto en un
+// resumen de julio/26 donde esto rompía más de la mitad de las filas).
+// Por eso agrupamos por CERCANÍA vertical (cluster con tolerancia) en
+// vez de por igualdad exacta.
 async function extraerLineasPdf(file) {
   const pdfjsLib = await cargarPdfjs();
   const buf = await file.arrayBuffer();
   const pdf = await conTimeout(pdfjsLib.getDocument({ data: buf }).promise, 25000, "El PDF tardó demasiado en procesarse (más de 25s). Puede ser un problema de conexión con el worker de lectura.");
   const lineas = [];
+  const TOLERANCIA_Y = 2.5; // puntos
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
-    const porY = {};
-    content.items.forEach((it) => {
-      const y = Math.round(it.transform[5]);
-      if (!porY[y]) porY[y] = [];
-      porY[y].push(it);
+    const items = content.items
+      .filter((it) => (it.str || "").trim() !== "")
+      .map((it) => ({ str: it.str, x: it.transform[4], y: it.transform[5] }))
+      .sort((a, b) => b.y - a.y || a.x - b.x);
+
+    const grupos = [];
+    let grupoActual = [];
+    let yPromedio = null;
+    items.forEach((it) => {
+      if (yPromedio === null || Math.abs(it.y - yPromedio) <= TOLERANCIA_Y) {
+        grupoActual.push(it);
+        // Promedio del grupo (no el último Y) para no "derivar" de a poco
+        // hacia abajo en tablas con muchas filas seguidas.
+        yPromedio = grupoActual.reduce((s, g) => s + g.y, 0) / grupoActual.length;
+      } else {
+        grupos.push(grupoActual);
+        grupoActual = [it];
+        yPromedio = it.y;
+      }
     });
-    const ys = Object.keys(porY).map(Number).sort((a, b) => b - a);
-    ys.forEach((y) => {
-      const linea = porY[y].sort((a, b) => a.transform[4] - b.transform[4]).map((it) => it.str).join(" ").replace(/\s+/g, " ").trim();
+    if (grupoActual.length) grupos.push(grupoActual);
+
+    grupos.forEach((grupo) => {
+      const linea = grupo.sort((a, b) => a.x - b.x).map((it) => it.str).join(" ").replace(/\s+/g, " ").trim();
       if (linea) lineas.push(linea);
     });
   }
@@ -331,10 +356,50 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   // suma solo el cargo adicional del resumen, y entre los dos dan el
   // total real de la tarjeta sin duplicar nada.
   const textoCompleto = lineas.join("\n");
-  const totalMatch = textoCompleto.match(/LA SUMA DE\s*\$\s*([\d.]+,\d{2})/i);
+  // El total real del resumen lo buscamos primero como "SALDO ACTUAL" —
+  // aparece siempre, en pesos, y es el balance real de la tarjeta. NO
+  // usamos "LA SUMA DE $" como fuente principal: en los resúmenes
+  // "Consolidado" más nuevos esa frase acompaña al débito automático del
+  // PAGO MÍNIMO (una cuenta separada), NO al total de la tarjeta — usar
+  // esa cifra hacía que el ajuste de impuestos/tasas diera negativo y se
+  // perdiera en silencio (bug real, visto en un resumen de julio/26
+  // donde "LA SUMA DE $" era el pago mínimo de $106.740 en vez del
+  // saldo real de $791.105,75). "LA SUMA DE $" queda de respaldo nomás,
+  // para algún resumen viejo donde no aparezca "SALDO ACTUAL".
+  const saldoActualMatches = [...textoCompleto.matchAll(/SALDO ACTUAL\s+([\d.]+,\d{2})/gi)];
+  const totalMatch = saldoActualMatches[0] || textoCompleto.match(/LA SUMA DE\s*\$\s*([\d.]+,\d{2})/i);
   const sobreMatch = textoCompleto.match(/Sobre\s*\((\d+)\)/i);
   if (totalMatch) {
     const totalAPagar = Number(totalMatch[1].replace(/\./g, "").replace(",", "."));
+    if (saldoActualMatches.length > 1) {
+      const valores = new Set(saldoActualMatches.map((m) => m[1]));
+      if (valores.size > 1) {
+        avisos.push(`Encontré más de un "SALDO ACTUAL" con valores distintos en ${cuenta} (${[...valores].join(" / ")}) — usé ${fmtARS(totalAPagar)}, revisá el resumen a mano.`);
+      }
+    }
+    // El patrón "clásico" (la etiqueta seguida directo de su fecha) sirve
+    // para resúmenes donde cada dato va pegado a su título. En el
+    // formato "Consolidado" más nuevo, en cambio, varios títulos van
+    // juntos en una fila ("CIERRE ACTUAL VENCIMIENTO ACTUAL...") y sus
+    // valores en la fila de abajo, en el mismo orden — ahí el patrón
+    // clásico no encuentra nada porque entre la etiqueta y su fecha hay
+    // de por medio el resto de los títulos. Por eso, si el patrón
+    // clásico falla, escaneamos esa fila de encabezado y tomamos las
+    // fechas en el mismo orden en que aparecen las columnas (cierre
+    // primero, vencimiento después).
+    function buscarFechaEnEncabezado(cual) {
+      const headerIdx = lineas.findIndex((l) => /CIERRE ACTUAL/i.test(l) && /VENCIMIENTO ACTUAL/i.test(l));
+      if (headerIdx === -1) return null;
+      const fechas = [];
+      for (let i = headerIdx + 1; i < Math.min(headerIdx + 4, lineas.length) && fechas.length < 2; i++) {
+        [...lineas[i].matchAll(/(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/g)].forEach((m) => {
+          if (fechas.length < 2) fechas.push(m);
+        });
+      }
+      const idx = cual === "cierre" ? 0 : 1;
+      return fechas[idx] ? fechaBbvaAIso(fechas[idx][1], fechas[idx][2], fechas[idx][3]) : null;
+    }
+
     const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
     const cierreMatch = textoCompleto.match(/CIERRE ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
 
@@ -349,9 +414,17 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       fechaVenc = fechaBbvaAIso(vencMatch[1], vencMatch[2], vencMatch[3]);
       origenFecha = "vencimiento";
     }
+    if (!fechaVenc) {
+      const f = buscarFechaEnEncabezado("vencimiento");
+      if (f) { fechaVenc = f; origenFecha = "vencimiento"; }
+    }
     if (!fechaVenc && cierreMatch) {
       fechaVenc = fechaBbvaAIso(cierreMatch[1], cierreMatch[2], cierreMatch[3]);
       origenFecha = "cierre";
+    }
+    if (!fechaVenc) {
+      const f = buscarFechaEnEncabezado("cierre");
+      if (f) { fechaVenc = f; origenFecha = "cierre"; }
     }
     if (!fechaVenc && filas.length > 0) {
       fechaVenc = [...filas].sort((a, b) => b.date.localeCompare(a.date))[0].date;
