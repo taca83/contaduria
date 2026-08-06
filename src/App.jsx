@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v123 · 2026-08-06 · (1) "Gasto por tarjeta, mes a mes" ya no usa la tabla ancha rota en escritorio — ahora usa el mismo layout de tarjetas que ya andaba bien en el celu (sin scroll horizontal), y tiene su PROPIO selector de rango (3M/6M/12M/24M/Todo), independiente de "Evolución" — así se ve claro cómo mirar meses más viejos; (2) "⚠️ Aumentos de gasto" ahora es plegable, arranca cerrado mostrando solo un resumen de una línea, con botón para desplegar el detalle; (3) Movimientos: nuevo filtro de fecha puntual o rango (Desde/Hasta), independiente del buscador de texto
-const APP_VERSION = "v123 · 2026-08-06";
+// v124 · 2026-08-06 · encontrada la causa de "veo menos importaciones de las que hice": cuando se suben varios PDFs juntos (selección múltiple) y se confirma la importación de una sola vez, quedaba registrado como UN SOLO evento en el historial, sin importar cuántos archivos incluía — así "6 importaciones" podían representar más de 15 documentos reales. Ahora cada evento del historial guarda los nombres de los archivos que incluyó, y "Importaciones de datos" los muestra (con el conteo de archivos si son varios). Esto aplica a partir de ahora — las importaciones ya hechas no se pueden reconstruir retroactivamente, esa info no se guardó en su momento
+const APP_VERSION = "v124 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -2486,7 +2486,7 @@ export default function FinanzasApp() {
           {tab === "importar" && (
             <ImportarTab
               categoryOverrides={categoryOverrides}
-              onImport={async (rows, formato) => {
+              onImport={async (rows, formato, archivos) => {
                 const sig = (e) => `${e.date}|${Number(e.amount)}|${(e.desc || "").trim().toLowerCase()}|${(e.account || "").trim().toLowerCase()}`;
                 const existentes = new Set(entries.map(sig));
                 const vistosEnLote = new Set();
@@ -2540,6 +2540,7 @@ export default function FinanzasApp() {
                     cantidad_duplicados: descartados.length,
                     cantidad_total: rows.length,
                     duplicados_detalle: descartados,
+                    archivos: archivos && archivos.length > 0 ? archivos : undefined,
                   }, null, String(nuevos.length));
                   return { imported: nuevos.length, duplicates: descartados.length };
                 } catch (err) {
@@ -4040,13 +4041,14 @@ function ImportarTab({ onImport, categoryOverrides }) {
     setImporting(true);
     const formatoLabel = { bbva: "PDF BBVA", mercadopago: "PDF Mercado Pago", colegio: "PDF Colegio", csv: "CSV/texto" }[modo] || modo;
     try {
-      const res = await onImport(result.rows, formatoLabel);
+      const res = await onImport(result.rows, formatoLabel, pdfNombres);
       if (res?.error) {
         setLastImportMsg({ tone: "warn", text: `No se completó la importación: ${res.error}` });
         return;
       }
       setText("");
       setResult(null);
+      setPdfNombres([]);
       if (res && typeof res === "object") {
         setLastImportMsg({
           tone: res.duplicates > 0 ? "warn" : "ok",
@@ -4314,12 +4316,16 @@ function ImportacionesCard({ entries }) {
             const snap = c.entry_snapshot || {};
             let fecha = "";
             try { fecha = new Date(c.created_at).toLocaleString("es-AR"); } catch {}
+            const archivos = Array.isArray(snap.archivos) ? snap.archivos : [];
             return (
               <div key={c.id} style={{ border: "1px solid #f2eee2", borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexWrap: "wrap", gap: 4 }}>
-                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>{snap.formato || "Importación"}</span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>{snap.formato || "Importación"}{archivos.length > 1 ? ` (${archivos.length} archivos)` : ""}</span>
                   <span style={{ fontSize: 11, color: "#8a9698" }}>{fecha}{c.who ? ` · ${c.who}` : ""}</span>
                 </div>
+                {archivos.length > 0 && (
+                  <div style={{ fontSize: 11.5, color: TEAL, marginBottom: 4 }}>{archivos.join(", ")}</div>
+                )}
                 <div style={{ fontSize: 12.5 }}>
                   <b style={{ color: GREEN }}>{snap.cantidad_importada ?? 0}</b> movimientos cargados
                   {snap.cantidad_total != null && Number(snap.cantidad_total) !== Number(snap.cantidad_importada) && (
