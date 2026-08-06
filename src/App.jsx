@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v121 · 2026-08-06 · BUG SERIO encontrado y corregido: la consulta de movimientos (carga inicial y refresco automático cada 45s) no paginaba — Supabase trunca en silencio cualquier consulta sin límite explícito a un tope por defecto, y con "order=date.desc" eso cortaba justo las filas más VIEJAS sin ningún error. Así "desaparecían" enero/febrero después de varias importaciones, aunque los datos seguían enteros en la base. Ahora se pagina de a 1000 filas hasta traer todo. Además, salvaguarda en el parser de Mercado Pago: si una fila queda con una descripción anormalmente larga (señal de que el parseo se enganchó con texto de portada/pie de página, un problema real distinto que se está investigando con el PDF real) se saltea con aviso en vez de guardarse
-const APP_VERSION = "v121 · 2026-08-06";
+// v122 · 2026-08-06 · fix real de Mercado Pago (probado contra un PDF real): el pie de página fijo del PDF ("Fecha de generación: DD-MM-AAAA") tiene el mismo formato que una fecha de movimiento — el regex la tomaba como transacción real y se tragaba todo el texto del pie de página hasta la próxima transacción de verdad, perdiéndola y generando una fila con descripción gigante. Se limpia ese texto antes de parsear. Además, en BBVA: el aviso de "total de consumos no coincide" ya no se duplica (el dato aparece dos veces en el mismo resumen) y ahora usa tolerancia relativa de 1% del total (con piso de $1) en vez de un monto fijo, para no marcar como error una diferencia de redondeo en resúmenes grandes
+const APP_VERSION = "v122 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -516,14 +516,23 @@ function parsearResumenBBVA(lineasCrudas, nombreArchivo, overrides = {}) {
 
   // Validación 2: cotejamos "TOTAL CONSUMOS DE ..." de cada titular
   // (dato que el propio resumen declara) contra lo que efectivamente
-  // sumamos línea por línea — si no coincide EXACTO, es señal segura de
-  // que el parseo se comió o duplicó algo, y conviene saberlo ya mismo
-  // en vez de descubrirlo mirando el total general.
+  // sumamos línea por línea — si no coincide, es señal de que el parseo
+  // se comió o duplicó algo. Usamos tolerancia relativa (1% del total
+  // declarado) en vez de un monto fijo — con resúmenes grandes, una
+  // diferencia de unos pocos pesos por redondeo no es un error real.
+  // "TOTAL CONSUMOS DE ..." aparece DOS VECES en el resumen (una en el
+  // resumen de Pesos/Dólares de arriba, otra al final del detalle de esa
+  // persona) — juntamos por persona para no avisar dos veces lo mismo.
+  const totalesDeclaradosPorPersona = {};
   [...textoCompleto.matchAll(/TOTAL CONSUMOS DE (NATALIA WAJSMAN|HERNAN ISRAEL)\s+([\d.]+,\d{2})/gi)].forEach(([, quien, montoTxt]) => {
     const persona = /NATALIA/i.test(quien) ? "Natalia" : "Hernán";
-    const declarado = Number(montoTxt.replace(/\./g, "").replace(",", "."));
+    totalesDeclaradosPorPersona[persona] = Number(montoTxt.replace(/\./g, "").replace(",", "."));
+  });
+  Object.entries(totalesDeclaradosPorPersona).forEach(([persona, declarado]) => {
     const sumado = Math.round((sumaPorPersona[persona] || 0) * 100) / 100;
-    if (Math.abs(declarado - sumado) > 1) {
+    const diferencia = Math.abs(declarado - sumado);
+    const tolerancia = Math.max(1, declarado * 0.01); // 1% del total, con piso de $1 por redondeo
+    if (diferencia > tolerancia) {
       avisos.push(`⚠ El total de consumos de ${persona} que declara el resumen (${fmtARS(declarado)}) no coincide con lo que sumé línea por línea (${fmtARS(sumado)}) en ${cuenta} — puede haber un error de parseo, revisá los movimientos de ${persona} a mano.`);
     }
   });
@@ -620,9 +629,27 @@ async function extraerTextoPdf(file) {
 
 // Parser del resumen de Mercado Pago (movimientos en pesos).
 // Ignora todo lo que aparezca después de "RESUMEN DE TENENCIAS EN DÓLARES".
-function parsearResumenMercadoPago(fullText, overrides = {}) {
+function parsearResumenMercadoPago(fullTextCrudo, overrides = {}) {
   const filas = [];
   const avisos = [];
+
+  // El PDF trae un pie de página fijo ("Fecha de generación: DD-MM-AAAA
+  // ... Mercado Libre S.R.L. CUIT ... www.mercadopago.com.ar") que
+  // pdf.js a veces mete pegado al principio de una página, sin salto de
+  // línea real que lo separe de la transacción de al lado. El problema
+  // real: "Fecha de generación: DD-MM-AAAA" tiene el MISMO formato que
+  // una fecha de movimiento — el regex de abajo la toma como si fuera
+  // una transacción real, y como no hay salto de línea que lo frene,
+  // se traga TODO el texto del pie de página hasta la próxima
+  // transacción real, perdiéndola en el camino y generando una fila
+  // basura con una descripción gigante (bug real, visto con un PDF real
+  // donde así se perdió una transacción y otra quedó con 200+
+  // caracteres de descripción). Lo sacamos antes de parsear nada.
+  const fullText = fullTextCrudo
+    .replace(/Fecha de generaci[óo]n:\s*\d{2}-\d{2}-\d{4}/gi, " ")
+    .replace(/Mercado Libre S\.R\.L\.[\s\S]*?mercadopago\.com\.ar/gi, " ")
+    .replace(/Estas operaciones fueron realizadas por Industrial Valores[\s\S]*?no interviene\s*en la operaci[óo]n\.?/gi, " ");
+
   const seccionPesos = fullText.split(/RESUMEN DE TENENCIAS EN D[ÓO]LARES/i)[0];
 
   // Detecta de quién es la cuenta según el titular que figura en el propio
