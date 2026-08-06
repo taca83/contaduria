@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v115 · 2026-08-06 · el parser de BBVA ahora nombra la cuenta usando el destinatario real del resumen (ej. "Visa Signature Natalia" vs "Visa Signature Hernán"), detectado del sobre — así tu Visa Signature y la de Natalia no quedan mezcladas bajo el mismo nombre genérico cuando cada uno tiene la suya. En resúmenes compartidos (ambos titulares en el mismo PDF) el sufijo "· Natalia" del desglose por tarjeta ya no se duplica si el nombre de cuenta ya lo incluye
-const APP_VERSION = "v115 · 2026-08-06";
+// v116 · 2026-08-06 · fix real de falsos duplicados al importar: la firma de duplicados (fecha+monto+descripción+cuenta) no podía distinguir dos consumos reales y DISTINTOS con esos 4 datos iguales (ej. dos peajes AUSOL del mismo día y mismo monto) — se descartaban por error. Ahora BBVA agrega el Nro. de Cupón y Mercado Pago el Nro. de operación a la descripción (ambos ya se leían pero se descartaban sin usar), volviendo cada movimiento único de verdad. descKey se ajustó para seguir agrupando por comercio en las reglas de categorización aprendidas, ignorando ese número
+const APP_VERSION = "v116 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -193,6 +193,11 @@ function descKey(desc) {
   return (desc || "")
     .toUpperCase()
     .replace(/\s*\(CUOTA[^)]*\)\s*/g, "")
+    // El Nro. de Cupón / Nro. de operación es único por transacción — lo
+    // sacamos acá para que las reglas de categorización aprendidas sigan
+    // agrupando por comercio (ej. todas las de "MERPAGO*AUSOL" bajo la
+    // misma regla), no una regla nueva por cada cupón distinto.
+    .replace(/\s*\[(CUP[ÓO]N|OP\.)[^\]]*\]\s*/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -428,14 +433,22 @@ function parsearResumenBBVA(lineasCrudas, nombreArchivo, overrides = {}) {
     }
     const m = linea.match(LINEA_MOV);
     if (!m) return;
-    const [, dd, mmm, yy, descRaw, , montoRaw] = m;
+    const [, dd, mmm, yy, descRaw, cupon, montoRaw] = m;
     const fechaCompra = fechaBbvaAIso(dd, mmm, yy);
     if (!fechaCompra) { avisos.push(`No pude leer la fecha en: "${linea}"`); return; }
     const monto = Number(montoRaw.replace(/\./g, "").replace(",", "."));
     if (!monto) return;
     sumaConsumosPeriodo += monto;
     const esCuota = /\s*C\.\d{2}\/\d{2}\s*$/.test(descRaw);
-    const desc = descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, (s) => ` (cuota${s.trim().replace("C.", " ")})`).trim();
+    // El Nro. de Cupón identifica cada consumo de forma única — lo
+    // agregamos a la descripción para que quede como parte de la firma
+    // de duplicados (fecha+monto+descripción+cuenta). Sin esto, dos
+    // consumos reales y DISTINTOS con la misma fecha, mismo monto y
+    // mismo comercio (ej. dos peajes de AUSOL el mismo día, ambos
+    // $994,15) se detectaban como "el mismo movimiento" y se
+    // descartaban al importar — un bug real, visto con varios AUSOL,
+    // una recarga SUBE y hasta compras de entradas puntuales.
+    const desc = `${descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, (s) => ` (cuota${s.trim().replace("C.", " ")})`).trim()} [Cupón ${cupon}]`;
     const persona = seccionActual === "Natalia Wajsman" ? "Natalia" : "Hernán";
     sumaPorPersona[persona] = (sumaPorPersona[persona] || 0) + monto;
     // Las compras en cuotas traen en la columna FECHA la fecha de la
@@ -624,7 +637,7 @@ function parsearResumenMercadoPago(fullText, overrides = {}) {
   let encontrados = 0;
   while ((m = lineRegex.exec(seccionPesos)) !== null) {
     encontrados++;
-    const [, fechaStr, descRaw, , valorStr] = m;
+    const [, fechaStr, descRaw, numOp, valorStr] = m;
     const desc = descRaw.trim();
 
     if (/^Rendimientos$/i.test(desc)) continue; // regla acordada: se excluyen
@@ -649,7 +662,15 @@ function parsearResumenMercadoPago(fullText, overrides = {}) {
       category = "Otros ingresos";
     }
 
-    filas.push({ date: fecha, type, category, amount: Math.abs(valor), desc, account: "Mercado Pago", who: titular || undefined, origen: "pdf_mercadopago" });
+    // El número de operación identifica cada movimiento de forma única
+    // — lo agregamos a la descripción final (no a la que usamos arriba
+    // para las exclusiones/categorización) para que quede como parte de
+    // la firma de duplicados. Sin esto, dos recargas reales y DISTINTAS
+    // con la misma fecha, mismo monto y mismo texto (ej. dos pagos de
+    // "Pago AUSOL" o "Pago SUBE" del mismo día) se descartaban al
+    // importar por parecer "el mismo movimiento".
+    const descFinal = `${desc} [Op. ${numOp}]`;
+    filas.push({ date: fecha, type, category, amount: Math.abs(valor), desc: descFinal, account: "Mercado Pago", who: titular || undefined, origen: "pdf_mercadopago" });
   }
   if (encontrados === 0) avisos.push("No encontré líneas con el formato esperado de Mercado Pago.");
   return { filas, avisos };
