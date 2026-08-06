@@ -79,8 +79,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v110 · 2026-08-06 · TRES bugs reales del parser de BBVA, encontrados y corregidos probando contra un PDF real que fallaba: (1) el agrupador de líneas de pdf.js usaba Y exacto y perdía filas cuando el importe caía 1pt off del resto de la línea (perdía >60% de los consumos); ahora agrupa por cercanía; (2) el total del resumen se detectaba con "LA SUMA DE $", que en el formato "Consolidado" nuevo es el PAGO MÍNIMO auto-debitado, no el saldo real — ahora usa "SALDO ACTUAL" como fuente principal; (3) la fecha de vencimiento no se encontraba en resúmenes donde título y valor quedan en líneas separadas — se agregó un escaneo de la fila de encabezado como respaldo
-const APP_VERSION = "v110 · 2026-08-06";
+// v111 · 2026-08-06 · las compras en cuotas ya no esparcen el gasto en varios meses pasados (usaban la fecha de la compra ORIGINAL en vez de la fecha de esta cuota puntual) — ahora usan la fecha de cierre del resumen. Además, la pantalla de Importar (BBVA) ahora muestra el total real de cada resumen (SALDO ACTUAL) al lado de la suma de lo que se va a importar, para verificar de un vistazo que coinciden antes de confirmar
+const APP_VERSION = "v111 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -286,6 +286,46 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   const cuentaMatch = lineas.find((l) => /Visa Signature|Mastercard Black/i.test(l));
   const cuenta = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
 
+  const textoCompleto = lineas.join("\n");
+
+  // El patrón "clásico" (la etiqueta seguida directo de su fecha) sirve
+  // para resúmenes donde cada dato va pegado a su título. En el formato
+  // "Consolidado" más nuevo, en cambio, varios títulos van juntos en una
+  // fila ("CIERRE ACTUAL VENCIMIENTO ACTUAL...") y sus valores en la fila
+  // de abajo, en el mismo orden — ahí el patrón clásico no encuentra nada
+  // porque entre la etiqueta y su fecha hay de por medio el resto de los
+  // títulos. Por eso, si el patrón clásico falla, escaneamos esa fila de
+  // encabezado y tomamos las fechas en el mismo orden en que aparecen las
+  // columnas (cierre primero, vencimiento después).
+  function buscarFechaEnEncabezado(cual) {
+    const headerIdx = lineas.findIndex((l) => /CIERRE ACTUAL/i.test(l) && /VENCIMIENTO ACTUAL/i.test(l));
+    if (headerIdx === -1) return null;
+    const fechas = [];
+    for (let i = headerIdx + 1; i < Math.min(headerIdx + 4, lineas.length) && fechas.length < 2; i++) {
+      [...lineas[i].matchAll(/(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/g)].forEach((m) => {
+        if (fechas.length < 2) fechas.push(m);
+      });
+    }
+    const idx = cual === "cierre" ? 0 : 1;
+    return fechas[idx] ? fechaBbvaAIso(fechas[idx][1], fechas[idx][2], fechas[idx][3]) : null;
+  }
+
+  const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+  const cierreMatch = textoCompleto.match(/CIERRE ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
+
+  // Fecha de vencimiento — se usa para el ajuste de impuestos/tasas.
+  let fechaVenc = null;
+  let origenFecha = "";
+  if (vencMatch) { fechaVenc = fechaBbvaAIso(vencMatch[1], vencMatch[2], vencMatch[3]); origenFecha = "vencimiento"; }
+  if (!fechaVenc) { const f = buscarFechaEnEncabezado("vencimiento"); if (f) { fechaVenc = f; origenFecha = "vencimiento"; } }
+  if (!fechaVenc && cierreMatch) { fechaVenc = fechaBbvaAIso(cierreMatch[1], cierreMatch[2], cierreMatch[3]); origenFecha = "cierre"; }
+  if (!fechaVenc) { const f = buscarFechaEnEncabezado("cierre"); if (f) { fechaVenc = f; origenFecha = "cierre"; } }
+
+  // Fecha de cierre — se usa para las compras en cuotas (ver más abajo).
+  let fechaCierre = null;
+  if (cierreMatch) fechaCierre = fechaBbvaAIso(cierreMatch[1], cierreMatch[2], cierreMatch[3]);
+  if (!fechaCierre) fechaCierre = buscarFechaEnEncabezado("cierre");
+
   let seccionActual = null; // "Hernan Israel" | "Natalia Wajsman" | null
   let enSeccionPagos = false;
   // Suma de los consumos itemizados que sí pudimos leer línea por línea —
@@ -328,13 +368,22 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
     const m = linea.match(LINEA_MOV);
     if (!m) return;
     const [, dd, mmm, yy, descRaw, , montoRaw] = m;
-    const fecha = fechaBbvaAIso(dd, mmm, yy);
-    if (!fecha) { avisos.push(`No pude leer la fecha en: "${linea}"`); return; }
+    const fechaCompra = fechaBbvaAIso(dd, mmm, yy);
+    if (!fechaCompra) { avisos.push(`No pude leer la fecha en: "${linea}"`); return; }
     const monto = Number(montoRaw.replace(/\./g, "").replace(",", "."));
     if (!monto) return;
     sumaConsumosPeriodo += monto;
+    const esCuota = /\s*C\.\d{2}\/\d{2}\s*$/.test(descRaw);
     const desc = descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, (s) => ` (cuota${s.trim().replace("C.", " ")})`).trim();
     const persona = seccionActual === "Natalia Wajsman" ? "Natalia" : "Hernán";
+    // Las compras en cuotas traen en la columna FECHA la fecha de la
+    // compra ORIGINAL (a veces meses atrás), no la de esta cuota — si
+    // usáramos esa fecha, el gasto de ESTE resumen quedaría esparcido
+    // entre varios meses pasados y no se podría ver de un vistazo cuánto
+    // costó la tarjeta este mes. Por eso, para cuotas, usamos la fecha
+    // de cierre de ESTE resumen (cuando se cobra esta cuota puntual); la
+    // fecha de compra original queda igual visible en la descripción.
+    const fecha = esCuota && fechaCierre ? fechaCierre : fechaCompra;
     filas.push({
       date: fecha,
       type: "gasto",
@@ -355,7 +404,6 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   // fechada al vencimiento — así julio suma sus consumos reales y agosto
   // suma solo el cargo adicional del resumen, y entre los dos dan el
   // total real de la tarjeta sin duplicar nada.
-  const textoCompleto = lineas.join("\n");
   // El total real del resumen lo buscamos primero como "SALDO ACTUAL" —
   // aparece siempre, en pesos, y es el balance real de la tarjeta. NO
   // usamos "LA SUMA DE $" como fuente principal: en los resúmenes
@@ -377,55 +425,13 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
         avisos.push(`Encontré más de un "SALDO ACTUAL" con valores distintos en ${cuenta} (${[...valores].join(" / ")}) — usé ${fmtARS(totalAPagar)}, revisá el resumen a mano.`);
       }
     }
-    // El patrón "clásico" (la etiqueta seguida directo de su fecha) sirve
-    // para resúmenes donde cada dato va pegado a su título. En el
-    // formato "Consolidado" más nuevo, en cambio, varios títulos van
-    // juntos en una fila ("CIERRE ACTUAL VENCIMIENTO ACTUAL...") y sus
-    // valores en la fila de abajo, en el mismo orden — ahí el patrón
-    // clásico no encuentra nada porque entre la etiqueta y su fecha hay
-    // de por medio el resto de los títulos. Por eso, si el patrón
-    // clásico falla, escaneamos esa fila de encabezado y tomamos las
-    // fechas en el mismo orden en que aparecen las columnas (cierre
-    // primero, vencimiento después).
-    function buscarFechaEnEncabezado(cual) {
-      const headerIdx = lineas.findIndex((l) => /CIERRE ACTUAL/i.test(l) && /VENCIMIENTO ACTUAL/i.test(l));
-      if (headerIdx === -1) return null;
-      const fechas = [];
-      for (let i = headerIdx + 1; i < Math.min(headerIdx + 4, lineas.length) && fechas.length < 2; i++) {
-        [...lineas[i].matchAll(/(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/g)].forEach((m) => {
-          if (fechas.length < 2) fechas.push(m);
-        });
-      }
-      const idx = cual === "cierre" ? 0 : 1;
-      return fechas[idx] ? fechaBbvaAIso(fechas[idx][1], fechas[idx][2], fechas[idx][3]) : null;
-    }
 
-    const vencMatch = textoCompleto.match(/VENCIMIENTO ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
-    const cierreMatch = textoCompleto.match(/CIERRE ACTUAL\s*\n?\s*(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
-
-    // Cadena de respaldo para la fecha — NUNCA cae en "hoy" (eso mandaría
-    // un resumen de diciembre a la fecha real en la que lo importás, un
-    // bug serio que ya pasó una vez). Si no hay vencimiento ni cierre
-    // legibles, usamos la fecha del consumo más reciente que sí pudimos
-    // leer en este mismo PDF — siempre va a ser un dato REAL del resumen.
-    let fechaVenc = null;
-    let origenFecha = "";
-    if (vencMatch) {
-      fechaVenc = fechaBbvaAIso(vencMatch[1], vencMatch[2], vencMatch[3]);
-      origenFecha = "vencimiento";
-    }
-    if (!fechaVenc) {
-      const f = buscarFechaEnEncabezado("vencimiento");
-      if (f) { fechaVenc = f; origenFecha = "vencimiento"; }
-    }
-    if (!fechaVenc && cierreMatch) {
-      fechaVenc = fechaBbvaAIso(cierreMatch[1], cierreMatch[2], cierreMatch[3]);
-      origenFecha = "cierre";
-    }
-    if (!fechaVenc) {
-      const f = buscarFechaEnEncabezado("cierre");
-      if (f) { fechaVenc = f; origenFecha = "cierre"; }
-    }
+    // Cadena de respaldo para la fecha del ajuste — NUNCA cae en "hoy"
+    // (eso mandaría un resumen de diciembre a la fecha real en la que lo
+    // importás, un bug serio que ya pasó una vez). Si no hay vencimiento
+    // ni cierre legibles, usamos la fecha del consumo más reciente que
+    // sí pudimos leer en este mismo PDF — siempre va a ser un dato REAL
+    // del resumen.
     if (!fechaVenc && filas.length > 0) {
       fechaVenc = [...filas].sort((a, b) => b.date.localeCompare(a.date))[0].date;
       origenFecha = "último consumo del resumen";
@@ -478,7 +484,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
     avisos.push("No encontré la línea del total a pagar en este resumen — revisalo a mano.");
   }
 
-  return { filas, avisos };
+  return { filas, avisos, resumenInfo: { cuenta, total: totalMatch ? Number(totalMatch[1].replace(/\./g, "").replace(",", ".")) : null } };
 }
 
 // Extrae el texto crudo de un PDF en orden de lectura (sin reconstruir
@@ -3583,6 +3589,7 @@ function ImportarTab({ onImport, categoryOverrides }) {
   const [pdfProcesando, setPdfProcesando] = useState(false);
   const [pdfAvisos, setPdfAvisos] = useState([]);
   const [pdfNombres, setPdfNombres] = useState([]);
+  const [pdfResumenes, setPdfResumenes] = useState([]);
 
   async function handlePdfFiles(e) {
     const files = Array.from(e.target.files || []);
@@ -3590,14 +3597,20 @@ function ImportarTab({ onImport, categoryOverrides }) {
     setPdfProcesando(true);
     setPdfAvisos([]);
     setPdfNombres(files.map((f) => f.name));
+    setPdfResumenes([]);
     let todasLasFilas = [];
     let avisos = [];
+    let resumenes = [];
     for (const file of files) {
       try {
         const lineas = await conTimeout(extraerLineasPdf(file), 30000, `${file.name}: tardó demasiado en procesarse (más de 30s), lo salteo.`);
-        const { filas, avisos: av } = parsearResumenBBVA(lineas, file.name, categoryOverrides);
+        const { filas, avisos: av, resumenInfo } = parsearResumenBBVA(lineas, file.name, categoryOverrides);
         if (filas.length === 0) {
           avisos.push(`${file.name}: no reconocí movimientos con el formato BBVA. Puede ser otro banco/billetera — pasámelo a mí directamente en el chat para procesarlo.`);
+        }
+        if (resumenInfo) {
+          const sumaFilas = filas.reduce((s, f) => s + Number(f.amount), 0);
+          resumenes.push({ archivo: file.name, cuenta: resumenInfo.cuenta, total: resumenInfo.total, sumaFilas });
         }
         todasLasFilas = todasLasFilas.concat(filas);
         avisos = avisos.concat(av.map((a) => `${file.name}: ${a}`));
@@ -3606,6 +3619,7 @@ function ImportarTab({ onImport, categoryOverrides }) {
       }
     }
     setPdfAvisos(avisos);
+    setPdfResumenes(resumenes);
     setResult({ rows: todasLasFilas, errors: [] });
     setPdfProcesando(false);
   }
@@ -3776,6 +3790,24 @@ function ImportarTab({ onImport, categoryOverrides }) {
             {pdfProcesando ? "Leyendo PDF..." : "Elegir PDF(s)"}
           </label>
           {pdfNombres.length > 0 && <div style={{ fontSize: 12, color: TEAL, marginBottom: 8 }}>{pdfNombres.join(", ")}</div>}
+          {pdfResumenes.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: pdfAvisos.length > 0 ? 8 : 0 }}>
+              {pdfResumenes.map((r, i) => {
+                const diff = r.total != null ? Math.round((r.total - r.sumaFilas) * 100) / 100 : null;
+                const coincide = diff !== null && Math.abs(diff) <= 1;
+                return (
+                  <div key={i} style={{ background: coincide ? "#e8f3ec" : "#fdf1de", border: `1px solid ${coincide ? GREEN : GOLD}`, borderRadius: 8, padding: "10px 12px", fontSize: 12.5 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 2 }}>{r.cuenta} <span style={{ fontWeight: 400, color: "#8a9698" }}>({r.archivo})</span></div>
+                    <div>Total del resumen: <b style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{r.total != null ? fmtARS(r.total) : "no encontrado"}</b></div>
+                    <div>Suma de lo que se va a importar: <b style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(r.sumaFilas)}</b></div>
+                    {!coincide && r.total != null && (
+                      <div style={{ color: BRICK, marginTop: 2 }}>⚠ No coincide (diferencia de {fmtARS(Math.abs(diff))}) — revisá los avisos de abajo antes de importar.</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {pdfAvisos.length > 0 && (
             <div style={{ background: "#fbf1de", border: `1px solid ${GOLD}`, borderRadius: 8, padding: 10, fontSize: 12, marginTop: 4 }}>
               {pdfAvisos.map((a, i) => <div key={i}>{a}</div>)}
