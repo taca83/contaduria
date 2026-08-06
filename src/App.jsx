@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v118 · 2026-08-06 · el banner de biometría ya no aparece en escritorio (solo tiene sentido en celu) y se ajustó el texto
-const APP_VERSION = "v118 · 2026-08-06";
+// v120 · 2026-08-06 · (1) selector de mes en el celu ya no se rompe cuando aparece el botón "Hoy" — permite wrap y se achicó el ancho fijo del mes; (2) "Gasto por tarjeta, mes a mes" ahora tiene scroll interno con alto máximo, no crece sin límite con muchos meses de datos; (3) bug real: cargos en moneda extranjera DISTINTA a USD (ej. un cargo en ILS) se colaban como pesos — generalizada la detección de "USD" a cualquier código de 3 letras + importe. Además, al importar un PDF de un mes distinto al que se está viendo, la app salta sola a ese mes — antes quedaba en el mes actual mostrando vacío, dando la falsa sensación de que la importación no había hecho nada
+const APP_VERSION = "v120 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -421,14 +421,18 @@ function parsearResumenBBVA(lineasCrudas, nombreArchivo, overrides = {}) {
     }
     if (/^TOTAL CONSUMOS/i.test(linea)) { seccionActual = null; return; }
     if (!seccionActual) return;
-    if (/USD\s*\d/i.test(linea) && !/,\d{2}\s*$/.test(linea.replace(/USD.*$/i, ""))) {
-      // Línea con importe solo en USD (Apple, Google, Spotify, Anthropic,
-      // etc.) — la salteamos, igual que venimos haciendo a mano, porque
-      // no es deuda en pesos. OJO: no exigimos límite de palabra antes de
-      // "USD" — muchos códigos de transacción lo pegan directo sin
-      // espacio (ej. "in1Tl7fDBUSD 20,00"), y con \bUSD\b esas líneas no
-      // se detectaban, colando el importe en dólares como si fuera en
-      // pesos (bug real: sumaba de más).
+    // Línea con un importe en moneda extranjera METIDO EN LA DESCRIPCIÓN
+    // (Apple/Google/Spotify/Anthropic en USD, pero también vimos un cargo
+    // en ILS de una tienda israelí) — el número al final de esas líneas
+    // es el equivalente en dólares, NO en pesos, y NO hay que sumarlo
+    // como si fuera un gasto en pesos. Antes solo se buscaba "USD"
+    // textual; generalizado acá a cualquier código de 3 letras mayúsculas
+    // seguido de un importe (bug real: un cargo en ILS de $4,47 dólares
+    // se coló como si fueran $4,47 PESOS). No exigimos límite de palabra
+    // antes del código — muchos códigos de transacción lo pegan directo
+    // sin espacio (ej. "in1Tl7fDBUSD 20,00").
+    const monedaExtranjera = linea.match(/[A-Z]{3}\s+\d+,\d{2}\b/);
+    if (monedaExtranjera && !/,\d{2}\s*$/.test(linea.slice(0, monedaExtranjera.index).trim())) {
       return;
     }
     const m = linea.match(LINEA_MOV);
@@ -2141,20 +2145,20 @@ export default function FinanzasApp() {
             <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2, marginLeft: isDesktop ? 0 : 42 }}>
               Hola, {profileName}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 8, marginLeft: isDesktop ? 0 : 42 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 4, rowGap: 6, marginTop: 8, marginLeft: isDesktop ? 0 : 42, flexWrap: "wrap" }}>
               <button
                 onClick={() => shiftMonth(-1)}
                 aria-label="Mes anterior"
                 style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, cursor: "pointer", color: PAPER, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}
               >◀</button>
-              <span style={{ fontSize: 14, fontWeight: 700, textTransform: "capitalize", minWidth: 140, textAlign: "center" }}>{monthLabel(selectedMonth)}</span>
+              <span style={{ fontSize: 14, fontWeight: 700, textTransform: "capitalize", minWidth: 108, textAlign: "center", flexShrink: 0 }}>{monthLabel(selectedMonth)}</span>
               <button
                 onClick={() => shiftMonth(1)}
                 aria-label="Mes siguiente"
                 style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, cursor: "pointer", color: PAPER, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}
               >▶</button>
               {selectedMonth !== realThisMonth && (
-                <button onClick={() => setSelectedMonth(realThisMonth)} style={{ background: "none", border: `1px solid ${TEAL}`, borderRadius: 6, color: TEAL, fontSize: 11, padding: "4px 10px", marginLeft: 4, cursor: "pointer", height: 36 }}>
+                <button onClick={() => setSelectedMonth(realThisMonth)} style={{ background: "none", border: `1px solid ${TEAL}`, borderRadius: 6, color: TEAL, fontSize: 11, padding: "4px 8px", marginLeft: 2, cursor: "pointer", height: 36, flexShrink: 0 }}>
                   Hoy
                 </button>
               )}
@@ -2456,6 +2460,17 @@ export default function FinanzasApp() {
                     if (!HAS_SUPABASE) mockSaveEntries(next);
                     return next;
                   });
+                  // Si lo importado no es del mes que se está viendo (ej.
+                  // se importa un resumen de enero mientras la app está
+                  // en agosto), saltamos solos al mes correspondiente —
+                  // si no, el Resumen sigue mostrando el mes actual vacío
+                  // y da la sensación de que la importación no hizo nada,
+                  // aunque los datos sí se guardaron bien.
+                  if (nuevos.length > 0) {
+                    const fechaMasReciente = [...nuevos].sort((a, b) => b.date.localeCompare(a.date))[0].date;
+                    const mesImportado = fechaMasReciente.slice(0, 7);
+                    if (mesImportado !== selectedMonth) setSelectedMonth(mesImportado);
+                  }
                   await logAudit("import", {
                     formato: formato || "?",
                     cantidad_importada: nuevos.length,
@@ -2498,6 +2513,7 @@ export default function FinanzasApp() {
               onAddWhatsapp={addWhatsappLink}
               onDeleteWhatsapp={deleteWhatsappLink}
               onRenombrarMiembro={renombrarMiembro}
+              entries={entries}
             />
           )}
           {tab === "categorias" && (
@@ -3341,32 +3357,34 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
           <EmptyState text="Todavía no hay gastos de tarjeta cargados." />
         ) : isDesktop ? (
           <div style={{ overflowX: "auto" }}>
-            <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", paddingBottom: 8, borderBottom: "1px solid #eee6d5", minWidth: 160 + (cuentasTarjetaLabels.length + 1) * 130 }}>
-              <div style={{ flex: "0 0 120px" }}>Mes</div>
-              {cuentasTarjetaLabels.map((c) => (
-                <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>{c}</div>
-              ))}
-              <div style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>Total tarjeta</div>
-            </div>
-            {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => {
-              const total = cuentasTarjetaLabels.reduce((s, c) => s + (m[c] || 0), 0);
-              return (
-                <div key={i} style={{ display: "flex", padding: "8px 0", borderBottom: "1px solid #f2eee2", fontSize: 12.5, alignItems: "center", minWidth: 160 + (cuentasTarjetaLabels.length + 1) * 130 }}>
-                  <div style={{ flex: "0 0 120px", fontWeight: 600 }}>{m.mes}</div>
-                  {cuentasTarjetaLabels.map((c) => (
-                    <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", color: m[c] > 0 ? INK : "#ccc4ae" }}>
-                      {m[c] > 0 ? fmtARS(m[c]) : "—"}
+            <div style={{ minWidth: 160 + (cuentasTarjetaLabels.length + 1) * 130, maxHeight: 420, overflowY: "auto" }}>
+              <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", paddingBottom: 8, borderBottom: "1px solid #eee6d5", position: "sticky", top: 0, background: "#fff", zIndex: 1 }}>
+                <div style={{ flex: "0 0 120px" }}>Mes</div>
+                {cuentasTarjetaLabels.map((c) => (
+                  <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>{c}</div>
+                ))}
+                <div style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>Total tarjeta</div>
+              </div>
+              {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => {
+                const total = cuentasTarjetaLabels.reduce((s, c) => s + (m[c] || 0), 0);
+                return (
+                  <div key={i} style={{ display: "flex", padding: "8px 0", borderBottom: "1px solid #f2eee2", fontSize: 12.5, alignItems: "center" }}>
+                    <div style={{ flex: "0 0 120px", fontWeight: 600 }}>{m.mes}</div>
+                    {cuentasTarjetaLabels.map((c) => (
+                      <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", color: m[c] > 0 ? INK : "#ccc4ae" }}>
+                        {m[c] > 0 ? fmtARS(m[c]) : "—"}
+                      </div>
+                    ))}
+                    <div style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", fontWeight: 700, color: total > 0 ? INK : "#ccc4ae" }}>
+                      {total > 0 ? fmtARS(total) : "—"}
                     </div>
-                  ))}
-                  <div style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", fontWeight: 700, color: total > 0 ? INK : "#ccc4ae" }}>
-                    {total > 0 ? fmtARS(total) : "—"}
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 460, overflowY: "auto", paddingRight: 4 }}>
             {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => {
               const total = cuentasTarjetaLabels.reduce((s, c) => s + (m[c] || 0), 0);
               return (
@@ -4135,7 +4153,96 @@ function ImportarTab({ onImport, categoryOverrides }) {
   );
 }
 
-function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, onActivarBiometria, onDesactivarBiometria, bioBusy, bioError, whatsappLinks, profileName, onAddWhatsapp, onDeleteWhatsapp, onRenombrarMiembro }) {
+// Nuevo apartado en "Mi hogar": de dónde viene cada movimiento cargado
+// (manual, voz, WhatsApp, foto, PDF, recurrente, acceso rápido) y el
+// detalle de cada carga de archivo puntual (PDF/CSV), con cuántos
+// movimientos entraron en cada una.
+function ImportacionesCard({ entries }) {
+  const [cargas, setCargas] = useState(null); // null = cargando
+
+  useEffect(() => {
+    (async () => {
+      let rows;
+      if (!HAS_SUPABASE) {
+        rows = safeGet("mock_audit_log") || [];
+      } else {
+        try {
+          rows = await sb("audit_log?select=*&accion=eq.import&order=created_at.desc&limit=100");
+        } catch (e) {
+          console.error(e);
+          rows = [];
+        }
+      }
+      setCargas((rows || []).filter((r) => r.accion === "import" || !HAS_SUPABASE));
+    })();
+  }, []);
+
+  const porOrigen = useMemo(() => {
+    const map = {};
+    (entries || []).forEach((e) => {
+      const o = e.origen || "manual";
+      map[o] = (map[o] || 0) + 1;
+    });
+    return Object.entries(map)
+      .map(([origen, cantidad]) => ({ origen, cantidad, label: ORIGEN_LABELS[origen] || origen }))
+      .sort((a, b) => b.cantidad - a.cantidad);
+  }, [entries]);
+
+  return (
+    <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+      <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 4 }}>Importaciones de datos</div>
+      <div style={{ fontSize: 12.5, color: "#8a9698", marginBottom: 16 }}>
+        De dónde vienen tus movimientos cargados, y el detalle de cada carga de archivo (PDF/CSV).
+      </div>
+
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Movimientos por origen (todo el historial)</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 20 }}>
+        {porOrigen.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "#8a9698" }}>Todavía no hay movimientos cargados.</div>
+        ) : porOrigen.map((o) => (
+          <div key={o.origen} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "5px 0", borderBottom: "1px solid #f2eee2" }}>
+            <span>{o.label}</span>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700 }}>{o.cantidad}</span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Cargas de archivo (PDF/CSV), una por una</div>
+      {cargas === null ? (
+        <div style={{ fontSize: 12.5, color: "#8a9698" }}>Cargando...</div>
+      ) : cargas.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "#8a9698" }}>Todavía no importaste ningún archivo.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {cargas.map((c) => {
+            const snap = c.entry_snapshot || {};
+            let fecha = "";
+            try { fecha = new Date(c.created_at).toLocaleString("es-AR"); } catch {}
+            return (
+              <div key={c.id} style={{ border: "1px solid #f2eee2", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexWrap: "wrap", gap: 4 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>{snap.formato || "Importación"}</span>
+                  <span style={{ fontSize: 11, color: "#8a9698" }}>{fecha}{c.who ? ` · ${c.who}` : ""}</span>
+                </div>
+                <div style={{ fontSize: 12.5 }}>
+                  <b style={{ color: GREEN }}>{snap.cantidad_importada ?? 0}</b> movimientos cargados
+                  {snap.cantidad_total != null && Number(snap.cantidad_total) !== Number(snap.cantidad_importada) && (
+                    <span style={{ color: "#8a9698" }}> de {snap.cantidad_total} en el archivo</span>
+                  )}
+                  {Number(snap.cantidad_duplicados) > 0 && (
+                    <span style={{ color: GOLD }}> · {snap.cantidad_duplicados} descartados por duplicado</span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, onActivarBiometria, onDesactivarBiometria, bioBusy, bioError, whatsappLinks, profileName, onAddWhatsapp, onDeleteWhatsapp, onRenombrarMiembro, entries }) {
   const [editandoNombreDe, setEditandoNombreDe] = useState(null);
   const [nombreNuevo, setNombreNuevo] = useState("");
   const [renombrando, setRenombrando] = useState(false);
@@ -4366,6 +4473,8 @@ function HogarTab({ householdId, onLogout, biometriaSoportada, biometriaActiva, 
           </button>
         </div>
       )}
+
+      <ImportacionesCard entries={entries} />
 
       <button onClick={onLogout} style={{ ...btnOutline, color: BRICK, borderColor: BRICK, justifyContent: "center" }}>
         Cerrar sesión
