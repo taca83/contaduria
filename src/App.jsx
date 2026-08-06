@@ -79,8 +79,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v111 · 2026-08-06 · las compras en cuotas ya no esparcen el gasto en varios meses pasados (usaban la fecha de la compra ORIGINAL en vez de la fecha de esta cuota puntual) — ahora usan la fecha de cierre del resumen. Además, la pantalla de Importar (BBVA) ahora muestra el total real de cada resumen (SALDO ACTUAL) al lado de la suma de lo que se va a importar, para verificar de un vistazo que coinciden antes de confirmar
-const APP_VERSION = "v111 · 2026-08-06";
+// v112 · 2026-08-06 · el ajuste de impuestos/tasas/intereses ya no cae en el mes de vencimiento (agosto) — ahora cae el mismo día que el resto de los consumos de ESE resumen (fecha de cierre), así todo un resumen queda junto en un solo mes. Se renombró a "Impuestos y cargos de tarjeta" y su descripción ahora incluye siempre el total real del resumen ("Total del resumen: $X"), como registro permanente visible en Movimientos, no solo al momento de importar
+const APP_VERSION = "v112 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -401,9 +401,10 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   // e intereses que no vienen desglosados línea por línea. Si cargáramos
   // el total completo de nuevo, estaríamos contando esa plata dos veces.
   // Por eso acá solo agregamos la DIFERENCIA (impuestos/tasas/intereses),
-  // fechada al vencimiento — así julio suma sus consumos reales y agosto
-  // suma solo el cargo adicional del resumen, y entre los dos dan el
-  // total real de la tarjeta sin duplicar nada.
+  // fechada el mismo día que el resto de los consumos de este resumen
+  // (fecha de cierre) — así todo lo de ESTE resumen queda junto, en el
+  // mismo mes, y entre los dos (consumos + este ajuste) dan el total
+  // real de la tarjeta sin duplicar nada.
   // El total real del resumen lo buscamos primero como "SALDO ACTUAL" —
   // aparece siempre, en pesos, y es el balance real de la tarjeta. NO
   // usamos "LA SUMA DE $" como fuente principal: en los resúmenes
@@ -426,19 +427,23 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       }
     }
 
-    // Cadena de respaldo para la fecha del ajuste — NUNCA cae en "hoy"
-    // (eso mandaría un resumen de diciembre a la fecha real en la que lo
-    // importás, un bug serio que ya pasó una vez). Si no hay vencimiento
-    // ni cierre legibles, usamos la fecha del consumo más reciente que
-    // sí pudimos leer en este mismo PDF — siempre va a ser un dato REAL
-    // del resumen.
-    if (!fechaVenc && filas.length > 0) {
-      fechaVenc = [...filas].sort((a, b) => b.date.localeCompare(a.date))[0].date;
-      origenFecha = "último consumo del resumen";
+    // Fecha del ajuste: preferimos el cierre de ESTE resumen (mismo mes
+    // que los consumos de arriba); si no lo pudimos leer, caemos al
+    // vencimiento, y como último recurso — nunca "hoy" — a la fecha del
+    // consumo más reciente que sí pudimos leer en este mismo PDF.
+    let fechaAjuste = fechaCierre;
+    let origenAjuste = fechaCierre ? "cierre" : "";
+    if (!fechaAjuste && fechaVenc) { fechaAjuste = fechaVenc; origenAjuste = origenFecha; }
+    if (!fechaAjuste && filas.length > 0) {
+      fechaAjuste = [...filas].sort((a, b) => b.date.localeCompare(a.date))[0].date;
+      origenAjuste = "último consumo del resumen";
     }
 
-    if (totalAPagar > 0 && fechaVenc) {
+    if (totalAPagar > 0 && fechaAjuste) {
       const diferencia = Math.round((totalAPagar - sumaConsumosPeriodo) * 100) / 100;
+      const referenciaTotal = `Total del resumen: ${fmtARS(totalAPagar)}`;
+      const vencDisplay = vencMatch ? `${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]}` : (fechaVenc ? fechaVenc.split("-").reverse().join("-") : null);
+      const referenciaDoc = `${vencDisplay ? ` (vence ${vencDisplay})` : ""}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`;
 
       if (sumaConsumosPeriodo <= 0) {
         // No pudimos leer ningún consumo itemizado de este resumen (por
@@ -446,11 +451,11 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
         // no hay riesgo de duplicar nada, así que cargamos el total
         // completo como antes, marcado Pendiente para que se revise.
         filas.push({
-          date: fechaVenc,
+          date: fechaAjuste,
           type: "gasto",
           category: "Tarjetas",
           amount: totalAPagar,
-          desc: `Total a pagar — resumen ${cuenta}${vencMatch ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})` : ""}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
+          desc: `Total a pagar — resumen ${cuenta}${referenciaDoc}`,
           account: cuenta,
           origen: "pdf_bbva",
           pagado: false,
@@ -458,11 +463,11 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
         avisos.push(`No pude leer los consumos itemizados de ${cuenta} en este resumen, así que cargué el "Total a pagar" completo (${fmtARS(totalAPagar)}) sin desglosar — revisalo a mano.`);
       } else if (diferencia > 1) {
         filas.push({
-          date: fechaVenc,
+          date: fechaAjuste,
           type: "gasto",
           category: "Tarjetas",
           amount: diferencia,
-          desc: `Impuestos, tasas e intereses — resumen ${cuenta}${vencMatch ? ` (vence ${vencMatch[1]}-${vencMatch[2]}-${vencMatch[3]})` : ""}${sobreMatch ? ` [Doc. ${sobreMatch[1]}]` : ""}`,
+          desc: `Impuestos y cargos de tarjeta — resumen ${cuenta}${referenciaDoc} · ${referenciaTotal}`,
           account: cuenta,
           origen: "pdf_bbva",
           pagado: true,
@@ -472,8 +477,8 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       }
       // Si la diferencia está entre -1 y 1 no hacemos nada (es solo redondeo).
 
-      if (origenFecha !== "vencimiento") {
-        avisos.push(`La fecha del ajuste de "${cuenta}" quedó tomada por ${origenFecha} (no encontré el vencimiento) — revisá que la fecha sea la correcta.`);
+      if (origenAjuste === "último consumo del resumen") {
+        avisos.push(`La fecha del ajuste de "${cuenta}" quedó tomada por el último consumo del resumen (no encontré ni cierre ni vencimiento) — revisá que la fecha sea la correcta.`);
       }
     } else if (totalAPagar > 0) {
       avisos.push(`No pude leer ninguna fecha confiable para el "Total a pagar" de ${cuenta} — no lo agregué. Cargalo a mano si hace falta.`);
