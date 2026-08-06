@@ -71,6 +71,14 @@ function clasificarMedioPago(cuenta) {
 // "(Natalia)" que se agregaba antes al final de la descripción.
 function etiquetaTarjeta(entry) {
   const cuenta = (entry.account || "").trim() || "Sin cuenta especificada";
+  // El ajuste de impuestos/tasas/intereses (y el "Total a pagar" de
+  // respaldo cuando no se pudo itemizar) no son gasto de ningún titular
+  // en particular — son un cargo de la tarjeta en sí. Sin esto, caían
+  // bajo el mismo nombre que los consumos del titular principal,
+  // mezclándose y sin poder distinguirse de un vistazo.
+  if (/^(Impuestos y cargos de tarjeta|Total a pagar)\b/.test(entry.desc || "")) {
+    return `${cuenta} · Impuestos`;
+  }
   const esNatalia = entry.persona
     ? /natalia/i.test(entry.persona)
     : /\(Natalia\)\s*$/.test(entry.desc || "");
@@ -79,8 +87,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v112 · 2026-08-06 · el ajuste de impuestos/tasas/intereses ya no cae en el mes de vencimiento (agosto) — ahora cae el mismo día que el resto de los consumos de ESE resumen (fecha de cierre), así todo un resumen queda junto en un solo mes. Se renombró a "Impuestos y cargos de tarjeta" y su descripción ahora incluye siempre el total real del resumen ("Total del resumen: $X"), como registro permanente visible en Movimientos, no solo al momento de importar
-const APP_VERSION = "v112 · 2026-08-06";
+// v114 · 2026-08-06 · selector de mes (◀▶) agrandado para tocar más fácil. Parser BBVA: se agregaron 2 validaciones cruzadas contra los propios totales que trae el resumen (saldo anterior vs pagos, y total por titular vs suma línea por línea) que revelaron 2 bugs reales: (1) texto de pie de página pegado a una línea de dato al final de una página rompía el patrón y perdía ese consumo en silencio — ahora se limpia ese ruido antes de parsear; (2) la detección de líneas en USD exigía "USD" como palabra suelta y fallaba con códigos de transacción pegados directo a USD sin espacio (Apple/Google/Anthropic), colando el importe en dólares como si fuera en pesos
+const APP_VERSION = "v114 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -279,9 +287,26 @@ async function extraerLineasPdf(file) {
 }
 
 // Parser específico del formato de resumen BBVA (Visa Signature / Mastercard Black)
-function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
+function parsearResumenBBVA(lineasCrudas, nombreArchivo, overrides = {}) {
   const filas = [];
   const avisos = [];
+
+  // pdf.js a veces pega texto de pie de página (el aviso legal fijo del
+  // banco, la referencia "Sobre (...) N de M / Página X de Y", o
+  // artefactos del código de barras) a la MISMA línea que un dato real
+  // — pasa cuando una sección termina justo al final de una página. Eso
+  // rompe los patrones que exigen que la línea TERMINE en el importe, y
+  // se pierde el consumo en silencio (bug real: así se perdió un
+  // consumo de Natalia de $15.841,50 en un resumen). Lo limpiamos acá,
+  // antes de procesar nada.
+  const lineas = lineasCrudas
+    .map((l) => l
+      .replace(/\s*Banco BBVA Argentina S\.A\.\s*-\s*IVA Responsable Inscripto CUIT Nro\.\s*[\d-]+\s*/gi, " ")
+      .replace(/\s*Sobre\s*\(\d+\)\s*\d+\s*de\s*\d+\s*\/\s*P[áa]gina\s*\d+\s*de\s*\d+\s*/gi, " ")
+      .replace(/Ë[^\sÌ]{0,20}Ì/g, " ")
+      .replace(/\s+/g, " ")
+      .trim())
+    .filter(Boolean);
 
   const cuentaMatch = lineas.find((l) => /Visa Signature|Mastercard Black/i.test(l));
   const cuenta = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
@@ -332,26 +357,37 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   // sirve para no volver a contarlos dentro del "Total a pagar" del
   // resumen (ver más abajo: ese total ya los incluye).
   let sumaConsumosPeriodo = 0;
+  // Lo mismo pero abierto por persona — sirve para cotejar contra el
+  // "TOTAL CONSUMOS DE ..." que trae el propio resumen y detectar de
+  // entrada si el parseo se comió o duplicó alguna línea.
+  const sumaPorPersona = {};
+  // Suma de "Sus pagos y ajustes realizados" (pagos, notas de crédito,
+  // etc. del período) — sirve para cotejar contra el SALDO ANTERIOR y
+  // detectar si quedó algo sin cancelar del resumen previo.
+  let sumaAjustesAnteriores = 0;
   const LINEA_MOV = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+(.+?)\s+(\d{6})\s+(-?[\d.,]+)\s*$/;
-  const LINEA_PAGO = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+SU PAGO EN PESOS\s+(-?[\d.,]+)\s*$/i;
+  const LINEA_AJUSTE = /^(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})\s+(.+?)\s+(-?[\d.,]+,\d{2})\s*$/;
 
   lineas.forEach((linea) => {
     if (/^Sus pagos y ajustes realizados/i.test(linea)) { enSeccionPagos = true; return; }
     if (enSeccionPagos) {
-      // "SU PAGO EN USD" y cualquier otra línea que no sea "SU PAGO EN
-      // PESOS" no nos interesan acá (ya se maneja el USD aparte, y otros
-      // ajustes son casos borde poco frecuentes).
       // OJO: "SU PAGO EN PESOS" es el pago que ya hiciste del resumen
       // ANTERIOR (el que trae itemizados sus propios consumos + su
       // diferencia de impuestos/tasas, cargados cuando procesamos ESE
       // PDF). No la volvemos a cargar como gasto nuevo acá — si lo
       // hiciéramos, estaríamos sumando la misma plata una tercera vez.
       // No hace falta "avisar" nada: no es un error, es plata que ya
-      // está contabilizada en el mes en que se gastó.
+      // está contabilizada en el mes en que se gastó. Sí sumamos su
+      // monto (junto con cualquier otro ajuste de esta sección, como
+      // notas de crédito) para cotejar más abajo contra el SALDO
+      // ANTERIOR y detectar si quedó algo pendiente de cancelar.
       if (/^Consumos\s+(Hernan Israel|Natalia Wajsman)/i.test(linea)) {
         enSeccionPagos = false;
         seccionActual = /Natalia/i.test(linea) ? "Natalia Wajsman" : "Hernan Israel";
+        return;
       }
+      const aj = linea.match(LINEA_AJUSTE);
+      if (aj) sumaAjustesAnteriores += Number(aj[5].replace(/\./g, "").replace(",", "."));
       return;
     }
     if (/^Consumos\s+(Hernan Israel|Natalia Wajsman)/i.test(linea)) {
@@ -360,9 +396,14 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
     }
     if (/^TOTAL CONSUMOS/i.test(linea)) { seccionActual = null; return; }
     if (!seccionActual) return;
-    if (/\bUSD\b\s*\d/.test(linea) && !/,\d{2}\s*$/.test(linea.replace(/USD.*$/, ""))) {
-      // Línea con importe solo en USD (Apple, Google, Spotify, etc.) — la salteamos,
-      // igual que venimos haciendo a mano, porque no es deuda en pesos.
+    if (/USD\s*\d/i.test(linea) && !/,\d{2}\s*$/.test(linea.replace(/USD.*$/i, ""))) {
+      // Línea con importe solo en USD (Apple, Google, Spotify, Anthropic,
+      // etc.) — la salteamos, igual que venimos haciendo a mano, porque
+      // no es deuda en pesos. OJO: no exigimos límite de palabra antes de
+      // "USD" — muchos códigos de transacción lo pegan directo sin
+      // espacio (ej. "in1Tl7fDBUSD 20,00"), y con \bUSD\b esas líneas no
+      // se detectaban, colando el importe en dólares como si fuera en
+      // pesos (bug real: sumaba de más).
       return;
     }
     const m = linea.match(LINEA_MOV);
@@ -376,6 +417,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
     const esCuota = /\s*C\.\d{2}\/\d{2}\s*$/.test(descRaw);
     const desc = descRaw.replace(/\s*C\.\d{2}\/\d{2}\s*$/, (s) => ` (cuota${s.trim().replace("C.", " ")})`).trim();
     const persona = seccionActual === "Natalia Wajsman" ? "Natalia" : "Hernán";
+    sumaPorPersona[persona] = (sumaPorPersona[persona] || 0) + monto;
     // Las compras en cuotas traen en la columna FECHA la fecha de la
     // compra ORIGINAL (a veces meses atrás), no la de esta cuota — si
     // usáramos esa fecha, el gasto de ESTE resumen quedaría esparcido
@@ -418,6 +460,37 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   const saldoActualMatches = [...textoCompleto.matchAll(/SALDO ACTUAL\s+([\d.]+,\d{2})/gi)];
   const totalMatch = saldoActualMatches[0] || textoCompleto.match(/LA SUMA DE\s*\$\s*([\d.]+,\d{2})/i);
   const sobreMatch = textoCompleto.match(/Sobre\s*\((\d+)\)/i);
+
+  // Validación 1: ¿quedó algo del resumen ANTERIOR sin cancelar? Si
+  // SALDO ANTERIOR + los pagos/ajustes de este período no dan ~0, hay un
+  // saldo pendiente (a favor o en contra) que no es evidente a simple
+  // vista — avisamos y lo dejamos anotado en el ajuste de este resumen,
+  // para que quede un registro permanente (no solo en el import).
+  const saldoAnteriorMatch = textoCompleto.match(/SALDO ANTERIOR\s+(-?[\d.]+,\d{2})/i);
+  let saldoPendienteAnteriorTexto = "";
+  if (saldoAnteriorMatch) {
+    const saldoAnterior = Number(saldoAnteriorMatch[1].replace(/\./g, "").replace(",", "."));
+    const pendiente = Math.round((saldoAnterior + sumaAjustesAnteriores) * 100) / 100;
+    if (Math.abs(pendiente) > 1) {
+      avisos.push(`El saldo anterior de ${cuenta} no quedó en $0 después de los pagos/ajustes de este resumen — ${pendiente > 0 ? `parece haber quedado ${fmtARS(pendiente)} pendiente de pago` : `parece haber un saldo a favor de ${fmtARS(Math.abs(pendiente))}`}. Revisá el resumen a mano.`);
+      saldoPendienteAnteriorTexto = `⚠ Saldo anterior ${pendiente > 0 ? "pendiente" : "a favor"}: ${fmtARS(Math.abs(pendiente))} · `;
+    }
+  }
+
+  // Validación 2: cotejamos "TOTAL CONSUMOS DE ..." de cada titular
+  // (dato que el propio resumen declara) contra lo que efectivamente
+  // sumamos línea por línea — si no coincide EXACTO, es señal segura de
+  // que el parseo se comió o duplicó algo, y conviene saberlo ya mismo
+  // en vez de descubrirlo mirando el total general.
+  [...textoCompleto.matchAll(/TOTAL CONSUMOS DE (NATALIA WAJSMAN|HERNAN ISRAEL)\s+([\d.]+,\d{2})/gi)].forEach(([, quien, montoTxt]) => {
+    const persona = /NATALIA/i.test(quien) ? "Natalia" : "Hernán";
+    const declarado = Number(montoTxt.replace(/\./g, "").replace(",", "."));
+    const sumado = Math.round((sumaPorPersona[persona] || 0) * 100) / 100;
+    if (Math.abs(declarado - sumado) > 1) {
+      avisos.push(`⚠ El total de consumos de ${persona} que declara el resumen (${fmtARS(declarado)}) no coincide con lo que sumé línea por línea (${fmtARS(sumado)}) en ${cuenta} — puede haber un error de parseo, revisá los movimientos de ${persona} a mano.`);
+    }
+  });
+
   if (totalMatch) {
     const totalAPagar = Number(totalMatch[1].replace(/\./g, "").replace(",", "."));
     if (saldoActualMatches.length > 1) {
@@ -455,7 +528,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
           type: "gasto",
           category: "Tarjetas",
           amount: totalAPagar,
-          desc: `Total a pagar — resumen ${cuenta}${referenciaDoc}`,
+          desc: `${saldoPendienteAnteriorTexto}Total a pagar — resumen ${cuenta}${referenciaDoc}`,
           account: cuenta,
           origen: "pdf_bbva",
           pagado: false,
@@ -467,7 +540,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
           type: "gasto",
           category: "Tarjetas",
           amount: diferencia,
-          desc: `Impuestos y cargos de tarjeta — resumen ${cuenta}${referenciaDoc} · ${referenciaTotal}`,
+          desc: `${saldoPendienteAnteriorTexto}Impuestos y cargos de tarjeta — resumen ${cuenta}${referenciaDoc} · ${referenciaTotal}`,
           account: cuenta,
           origen: "pdf_bbva",
           pagado: true,
@@ -1962,12 +2035,20 @@ export default function FinanzasApp() {
             <div style={{ fontSize: 12, color: "#9db3b0", marginTop: 2, marginLeft: isDesktop ? 0 : 42 }}>
               Hola, {profileName}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, marginLeft: isDesktop ? 0 : 42 }}>
-              <button onClick={() => shiftMonth(-1)} aria-label="Mes anterior" style={{ background: "none", border: "none", cursor: "pointer", color: PAPER, opacity: 0.8, padding: 2 }}>◀</button>
-              <span style={{ fontSize: 13, fontWeight: 700, textTransform: "capitalize", minWidth: 130, textAlign: "center" }}>{monthLabel(selectedMonth)}</span>
-              <button onClick={() => shiftMonth(1)} aria-label="Mes siguiente" style={{ background: "none", border: "none", cursor: "pointer", color: PAPER, opacity: 0.8, padding: 2 }}>▶</button>
+            <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 8, marginLeft: isDesktop ? 0 : 42 }}>
+              <button
+                onClick={() => shiftMonth(-1)}
+                aria-label="Mes anterior"
+                style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, cursor: "pointer", color: PAPER, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}
+              >◀</button>
+              <span style={{ fontSize: 14, fontWeight: 700, textTransform: "capitalize", minWidth: 140, textAlign: "center" }}>{monthLabel(selectedMonth)}</span>
+              <button
+                onClick={() => shiftMonth(1)}
+                aria-label="Mes siguiente"
+                style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 8, cursor: "pointer", color: PAPER, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}
+              >▶</button>
               {selectedMonth !== realThisMonth && (
-                <button onClick={() => setSelectedMonth(realThisMonth)} style={{ background: "none", border: `1px solid ${TEAL}`, borderRadius: 6, color: TEAL, fontSize: 11, padding: "2px 8px", cursor: "pointer" }}>
+                <button onClick={() => setSelectedMonth(realThisMonth)} style={{ background: "none", border: `1px solid ${TEAL}`, borderRadius: 6, color: TEAL, fontSize: 11, padding: "4px 10px", marginLeft: 4, cursor: "pointer", height: 36 }}>
                   Hoy
                 </button>
               )}
@@ -3132,38 +3213,56 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
           <EmptyState text="Todavía no hay gastos de tarjeta cargados." />
         ) : isDesktop ? (
           <div style={{ overflowX: "auto" }}>
-            <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", paddingBottom: 8, borderBottom: "1px solid #eee6d5", minWidth: 160 + cuentasTarjetaLabels.length * 130 }}>
+            <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", paddingBottom: 8, borderBottom: "1px solid #eee6d5", minWidth: 160 + (cuentasTarjetaLabels.length + 1) * 130 }}>
               <div style={{ flex: "0 0 120px" }}>Mes</div>
               {cuentasTarjetaLabels.map((c) => (
                 <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>{c}</div>
               ))}
+              <div style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>Total tarjeta</div>
             </div>
-            {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => (
-              <div key={i} style={{ display: "flex", padding: "8px 0", borderBottom: "1px solid #f2eee2", fontSize: 12.5, alignItems: "center", minWidth: 160 + cuentasTarjetaLabels.length * 130 }}>
-                <div style={{ flex: "0 0 120px", fontWeight: 600 }}>{m.mes}</div>
-                {cuentasTarjetaLabels.map((c) => (
-                  <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", color: m[c] > 0 ? INK : "#ccc4ae" }}>
-                    {m[c] > 0 ? fmtARS(m[c]) : "—"}
+            {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => {
+              const total = cuentasTarjetaLabels.reduce((s, c) => s + (m[c] || 0), 0);
+              return (
+                <div key={i} style={{ display: "flex", padding: "8px 0", borderBottom: "1px solid #f2eee2", fontSize: 12.5, alignItems: "center", minWidth: 160 + (cuentasTarjetaLabels.length + 1) * 130 }}>
+                  <div style={{ flex: "0 0 120px", fontWeight: 600 }}>{m.mes}</div>
+                  {cuentasTarjetaLabels.map((c) => (
+                    <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", color: m[c] > 0 ? INK : "#ccc4ae" }}>
+                      {m[c] > 0 ? fmtARS(m[c]) : "—"}
+                    </div>
+                  ))}
+                  <div style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", fontWeight: 700, color: total > 0 ? INK : "#ccc4ae" }}>
+                    {total > 0 ? fmtARS(total) : "—"}
                   </div>
-                ))}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => (
-              <div key={i} style={{ border: "1px solid #f2eee2", borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, textTransform: "capitalize" }}>{m.mes}</div>
-                {cuentasTarjetaLabels.filter((c) => m[c] > 0).length === 0 ? (
-                  <div style={{ fontSize: 12, color: "#8a9698" }}>Sin gastos de tarjeta este mes.</div>
-                ) : cuentasTarjetaLabels.filter((c) => m[c] > 0).map((c) => (
-                  <div key={c} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
-                    <span style={{ color: "#8a9698" }}>{c}</span>
-                    <span style={{ color: GOLD, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m[c])}</span>
-                  </div>
-                ))}
-              </div>
-            ))}
+            {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => {
+              const total = cuentasTarjetaLabels.reduce((s, c) => s + (m[c] || 0), 0);
+              return (
+                <div key={i} style={{ border: "1px solid #f2eee2", borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, textTransform: "capitalize" }}>{m.mes}</div>
+                  {cuentasTarjetaLabels.filter((c) => m[c] > 0).length === 0 ? (
+                    <div style={{ fontSize: 12, color: "#8a9698" }}>Sin gastos de tarjeta este mes.</div>
+                  ) : (
+                    <>
+                      {cuentasTarjetaLabels.filter((c) => m[c] > 0).map((c) => (
+                        <div key={c} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
+                          <span style={{ color: "#8a9698" }}>{c}</span>
+                          <span style={{ color: GOLD, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m[c])}</span>
+                        </div>
+                      ))}
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, paddingTop: 5, marginTop: 3, borderTop: "1px dashed #eee6d5" }}>
+                        <span style={{ fontWeight: 700 }}>Total tarjeta</span>
+                        <span style={{ fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(total)}</span>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
