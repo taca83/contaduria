@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v117 · 2026-08-06 · fix real de por qué se pedía usuario/contraseña seguido: sb() ahora renueva el access_token sola y reintenta cuando vence a mitad de una sesión larga (antes tiraba error directo), y un problema de red al abrir la app ya NO borra la sesión guardada (antes sí, forzando login de nuevo aunque el token siguiera siendo válido) — ahora muestra "Reintentar". Además, nuevo banner (descartable) que ofrece activar Face ID/huella apenas se abre la app en un dispositivo compatible que no la tiene activada, en vez de estar escondido en "Mi hogar"
-const APP_VERSION = "v117 · 2026-08-06";
+// v118 · 2026-08-06 · el banner de biometría ya no aparece en escritorio (solo tiene sentido en celu) y se ajustó el texto
+const APP_VERSION = "v118 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -2305,10 +2305,10 @@ export default function FinanzasApp() {
       )}
 
       <div style={{ maxWidth: isDesktop ? 1080 : 720, margin: "0 auto", padding: "0 16px" }}>
-        {biometriaSoportada && !biometriaActiva && !bannerBiometriaCerrado && (
+        {!isDesktop && biometriaSoportada && !biometriaActiva && !bannerBiometriaCerrado && (
           <div style={{ marginTop: 16, background: "#fff", border: `1.5px solid ${TEAL}`, borderRadius: 10, padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
             <div style={{ fontSize: 12.5, color: INK }}>
-              🔐 Este dispositivo tiene Face ID / Touch ID / huella disponible — activalo para abrir la app sin escribir usuario y contraseña cada vez.
+              🔐 Este dispositivo tiene Biometria activada (Face ID / Touch ID) — activalo para abrir la app sin escribir usuario y contraseña cada vez.
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
               {bioError && <div style={{ color: BRICK, fontSize: 11 }}>{bioError}</div>}
