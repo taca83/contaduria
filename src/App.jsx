@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v120 · 2026-08-06 · (1) selector de mes en el celu ya no se rompe cuando aparece el botón "Hoy" — permite wrap y se achicó el ancho fijo del mes; (2) "Gasto por tarjeta, mes a mes" ahora tiene scroll interno con alto máximo, no crece sin límite con muchos meses de datos; (3) bug real: cargos en moneda extranjera DISTINTA a USD (ej. un cargo en ILS) se colaban como pesos — generalizada la detección de "USD" a cualquier código de 3 letras + importe. Además, al importar un PDF de un mes distinto al que se está viendo, la app salta sola a ese mes — antes quedaba en el mes actual mostrando vacío, dando la falsa sensación de que la importación no había hecho nada
-const APP_VERSION = "v120 · 2026-08-06";
+// v121 · 2026-08-06 · BUG SERIO encontrado y corregido: la consulta de movimientos (carga inicial y refresco automático cada 45s) no paginaba — Supabase trunca en silencio cualquier consulta sin límite explícito a un tope por defecto, y con "order=date.desc" eso cortaba justo las filas más VIEJAS sin ningún error. Así "desaparecían" enero/febrero después de varias importaciones, aunque los datos seguían enteros en la base. Ahora se pagina de a 1000 filas hasta traer todo. Además, salvaguarda en el parser de Mercado Pago: si una fila queda con una descripción anormalmente larga (señal de que el parseo se enganchó con texto de portada/pie de página, un problema real distinto que se está investigando con el PDF real) se saltea con aviso en vez de guardarse
+const APP_VERSION = "v121 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -644,7 +644,19 @@ function parsearResumenMercadoPago(fullText, overrides = {}) {
     const [, fechaStr, descRaw, numOp, valorStr] = m;
     const desc = descRaw.trim();
 
-    if (/^Rendimientos$/i.test(desc)) continue; // regla acordada: se excluyen
+    // Salvaguarda: una descripción real de Mercado Pago es corta ("Pago
+    // XYZ", "Transferencia enviada...", "Rendimientos"). Si nos quedó
+    // clavado texto de portada/pie de página del PDF (le pasó a la
+    // extracción de texto plana, que no reconstruye renglones por
+    // posición como sí hace BBVA), la descripción capturada se vuelve
+    // gigante — señal clara de que el parseo se enganchó mal. Mejor
+    // saltear la fila con aviso que guardar basura en la base.
+    if (desc.length > 150) {
+      avisos.push(`Una fila quedó con una descripción demasiado larga (probable error de lectura del PDF) — la salteé: "${desc.slice(0, 80)}..."`);
+      continue;
+    }
+
+    if (/Rendimientos/i.test(desc)) continue; // regla acordada: se excluyen
     if (/Hernan Pablo Israel/i.test(desc)) continue; // traspaso a uno mismo, excluido
 
     const [dd, mm, yyyy] = fechaStr.split("-");
@@ -952,6 +964,30 @@ async function sb(path, options = {}, _reintentado = false) {
   return res.json().catch(() => null);
 }
 
+// Pide TODAS las filas de una consulta, sin importar cuántas haya —
+// PostgREST (el motor de la API de Supabase) trunca en silencio
+// cualquier consulta sin límite explícito a un tope por defecto (suele
+// ser 1000 filas). Con "select=*&order=date.desc" sin paginar, una vez
+// que el hogar supera ese tope, las filas más VIEJAS quedaban afuera de
+// la respuesta sin ningún error — bug real: así "desaparecían" enero y
+// febrero de la vista después de varias importaciones, aunque los datos
+// seguían enteros en la base. Acá pedimos de a páginas hasta que una
+// venga incompleta (esa es la señal de que no queda nada más).
+async function sbAllPages(path) {
+  const TAMANO_PAGINA = 1000;
+  let offset = 0;
+  let todas = [];
+  while (true) {
+    const sep = path.includes("?") ? "&" : "?";
+    const pagina = await sb(`${path}${sep}limit=${TAMANO_PAGINA}&offset=${offset}`);
+    const filas = pagina || [];
+    todas = todas.concat(filas);
+    if (filas.length < TAMANO_PAGINA) break;
+    offset += TAMANO_PAGINA;
+  }
+  return todas;
+}
+
 async function sbAuth(path, options = {}) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
     ...options,
@@ -1165,7 +1201,7 @@ export default function FinanzasApp() {
   async function refrescarEntries() {
     if (!HAS_SUPABASE || !householdId) return;
     try {
-      const entRows = await sb(`entries?household_id=eq.${householdId}&select=*&order=date.desc`);
+      const entRows = await sbAllPages(`entries?household_id=eq.${householdId}&select=*&order=date.desc`);
       setEntries((entRows || []).map(entryFromDb));
     } catch (e) {
       console.error("No se pudo refrescar movimientos", e);
@@ -1295,7 +1331,7 @@ export default function FinanzasApp() {
     setHouseholdId(hh.household_id);
     setProfileName(hh.display_name);
     const [entRows, budRows, ovrRows, catRows, recRows, rapRows, waRows] = await Promise.all([
-      sb(`entries?household_id=eq.${hh.household_id}&select=*&order=date.desc`),
+      sbAllPages(`entries?household_id=eq.${hh.household_id}&select=*&order=date.desc`),
       sb(`budgets?household_id=eq.${hh.household_id}&select=*`),
       sb(`category_overrides?household_id=eq.${hh.household_id}&select=*`),
       sb(`categories?household_id=eq.${hh.household_id}&select=name&order=name.asc`),
