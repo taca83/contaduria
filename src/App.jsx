@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v116 · 2026-08-06 · fix real de falsos duplicados al importar: la firma de duplicados (fecha+monto+descripción+cuenta) no podía distinguir dos consumos reales y DISTINTOS con esos 4 datos iguales (ej. dos peajes AUSOL del mismo día y mismo monto) — se descartaban por error. Ahora BBVA agrega el Nro. de Cupón y Mercado Pago el Nro. de operación a la descripción (ambos ya se leían pero se descartaban sin usar), volviendo cada movimiento único de verdad. descKey se ajustó para seguir agrupando por comercio en las reglas de categorización aprendidas, ignorando ese número
-const APP_VERSION = "v116 · 2026-08-06";
+// v117 · 2026-08-06 · fix real de por qué se pedía usuario/contraseña seguido: sb() ahora renueva el access_token sola y reintenta cuando vence a mitad de una sesión larga (antes tiraba error directo), y un problema de red al abrir la app ya NO borra la sesión guardada (antes sí, forzando login de nuevo aunque el token siguiera siendo válido) — ahora muestra "Reintentar". Además, nuevo banner (descartable) que ofrece activar Face ID/huella apenas se abre la app en un dispositivo compatible que no la tiene activada, en vez de estar escondido en "Mi hogar"
+const APP_VERSION = "v117 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -884,11 +884,41 @@ const HAS_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY && !SUPABASE_URL.
 
 // El token de sesión del usuario logueado se guarda acá (fuera de React)
 // para que sb() lo use en cada request — necesario para que las políticas
-// de RLS por hogar (auth.uid()) funcionen.
+// de RLS por hogar (auth.uid()) funcionen. El refresh_token viaja con él,
+// para poder renovar la sesión sola cuando el access_token vence (dura
+// ~1h) SIN interrumpir a la persona con un login — antes esto solo se
+// intentaba una vez al abrir la app; si la sesión seguía abierta más de
+// una hora, todo empezaba a fallar hasta recargar la página.
 let _accessToken = null;
+let _refreshToken = null;
+let _onSessionRefreshed = null; // callback que registra el componente App, para guardar en localStorage + actualizar el estado de React cuando sb() renueva la sesión sola
 function setAccessToken(token) { _accessToken = token; }
+function setRefreshToken(token) { _refreshToken = token; }
+function setOnSessionRefreshed(fn) { _onSessionRefreshed = fn; }
 
-async function sb(path, options = {}) {
+let _refreshEnCurso = null; // evita disparar varios refresh en paralelo si llegan varios 401 juntos
+async function refrescarTokenSupabase() {
+  if (!_refreshToken) throw new Error("Sin refresh_token disponible");
+  if (_refreshEnCurso) return _refreshEnCurso;
+  _refreshEnCurso = (async () => {
+    const renovada = await sbAuth("token?grant_type=refresh_token", {
+      method: "POST",
+      body: JSON.stringify({ refresh_token: _refreshToken }),
+    });
+    if (!renovada?.access_token) throw new Error("No se pudo renovar la sesión");
+    _accessToken = renovada.access_token;
+    _refreshToken = renovada.refresh_token;
+    if (_onSessionRefreshed) _onSessionRefreshed(renovada);
+    return renovada;
+  })();
+  try {
+    return await _refreshEnCurso;
+  } finally {
+    _refreshEnCurso = null;
+  }
+}
+
+async function sb(path, options = {}, _reintentado = false) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...options,
     headers: {
@@ -898,6 +928,18 @@ async function sb(path, options = {}) {
       ...(options.headers || {}),
     },
   });
+  if (res.status === 401 && !_reintentado && _refreshToken) {
+    // Access token vencido en medio de un uso largo — lo renovamos solos
+    // y reintentamos una vez, sin que la persona vea ningún error.
+    try {
+      await refrescarTokenSupabase();
+      return sb(path, options, true);
+    } catch {
+      // El refresh_token también está vencido/inválido — no hay nada
+      // más para hacer del lado del cliente; sigue abajo y falla con el
+      // 401 original, que es lo que fuerza el login más arriba.
+    }
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`Supabase ${path} → ${res.status}: ${body}`);
@@ -1107,6 +1149,12 @@ export default function FinanzasApp() {
   const [session, setSession] = useState(null); // { access_token, refresh_token, user }
   const [householdId, setHouseholdId] = useState(null);
 
+  // Cada vez que sb() renueva el access_token sola (a mitad de una
+  // sesión larga), avisa acá — guardamos la sesión nueva en localStorage
+  // y actualizamos el estado de React, para que quede todo sincronizado
+  // sin que la persona note nada.
+  setOnSessionRefreshed((s) => { safeSet("auth_session", s); setSession(s); });
+
   // Refresca solo los movimientos (lo que más cambia "por afuera" de esta
   // sesión, ej. algo cargado por WhatsApp mientras la app estaba abierta) —
   // liviano, sin volver a traer categorías/presupuestos/etc.
@@ -1174,6 +1222,11 @@ export default function FinanzasApp() {
   const [desbloqueado, setDesbloqueado] = useState(false);
   const [bioBusy, setBioBusy] = useState(false);
   const [bioError, setBioError] = useState(null);
+  // Banner para ofrecer activar la biometría — se muestra una sola vez
+  // por dispositivo si no la activaste, y desaparece para siempre en
+  // cuanto la activás o la cerrás (no hace falta ir a buscarla a "Mi
+  // hogar" si no sabés que existe).
+  const [bannerBiometriaCerrado, setBannerBiometriaCerrado] = useState(() => typeof window !== "undefined" && !!safeGet("banner_biometria_cerrado"));
 
   useEffect(() => { soportaBiometria().then(setBiometriaSoportada); }, []);
 
@@ -1225,8 +1278,9 @@ export default function FinanzasApp() {
   const [authError, setAuthError] = useState(null);
   const [authBusy, setAuthBusy] = useState(false);
 
-  async function cargarHogarYDatos(accessToken) {
-    setAccessToken(accessToken);
+  async function cargarHogarYDatos(sesion) {
+    setAccessToken(sesion.access_token);
+    setRefreshToken(sesion.refresh_token);
     const miembro = await sb("household_members?select=household_id,display_name");
     if (!miembro || miembro.length === 0) {
       setAuthMode("onboarding");
@@ -1303,6 +1357,38 @@ export default function FinanzasApp() {
     await sb("entries", { method: "POST", body: JSON.stringify(nuevas.map((n) => ({ ...entryToDb(n), household_id: hhId }))) });
   }
 
+  async function intentarRestaurarSesion() {
+    const stored = safeGet("auth_session");
+    if (!stored?.access_token) {
+      setLoading(false);
+      return;
+    }
+    setSession(stored);
+    setLoadError(null);
+    try {
+      // sb() ya intenta renovar el access_token sola si vino vencido
+      // (ver más arriba) — no hace falta duplicar esa lógica acá.
+      await cargarHogarYDatos(stored);
+    } catch (e) {
+      console.error(e);
+      // Solo borramos la sesión guardada si el problema es realmente de
+      // autenticación (401, o el refresh_token vencido/inválido). Un
+      // error de red/conexión transitorio NO debería obligar a
+      // loguearse de nuevo — antes sí pasaba: cualquier hiccup al abrir
+      // la app tiraba la sesión entera aunque el token siguiera siendo
+      // válido, y esa era la causa real de tener que loguearse seguido.
+      const esProblemaDeSesion = /→ 401\b/.test(e?.message || "") || /invalid_grant|refresh.?token/i.test(e?.message || "");
+      if (esProblemaDeSesion) {
+        safeSet("auth_session", null);
+        setSession(null);
+        setLoading(false);
+      } else {
+        setLoadError("No pudimos conectar para cargar tus datos. Revisá tu conexión a internet y probá de nuevo.");
+        setLoading(false);
+      }
+    }
+  }
+
   useEffect(() => {
     (async () => {
       if (!HAS_SUPABASE) {
@@ -1320,35 +1406,7 @@ export default function FinanzasApp() {
           .catch((e) => console.error("No se pudieron generar los recurrentes del mes", e));
         return;
       }
-      try {
-        const stored = safeGet("auth_session");
-        if (!stored?.access_token) {
-          setLoading(false);
-          return;
-        }
-        setSession(stored);
-        try {
-          await cargarHogarYDatos(stored.access_token);
-        } catch (e) {
-          // El access_token dura ~1h — si venció, probamos renovarlo con el
-          // refresh_token antes de mandar a la persona a loguearse de nuevo.
-          if (!stored.refresh_token) throw e;
-          const renovada = await sbAuth("token?grant_type=refresh_token", {
-            method: "POST",
-            body: JSON.stringify({ refresh_token: stored.refresh_token }),
-          });
-          if (!renovada?.access_token) throw e;
-          safeSet("auth_session", renovada);
-          setSession(renovada);
-          await cargarHogarYDatos(renovada.access_token);
-        }
-      } catch (e) {
-        console.error(e);
-        // token vencido u otro problema — pedimos login de nuevo
-        safeSet("auth_session", null);
-        setSession(null);
-        setLoading(false);
-      }
+      await intentarRestaurarSesion();
     })();
   }, []);
 
@@ -1379,7 +1437,7 @@ export default function FinanzasApp() {
           body: JSON.stringify({ p_name: authHouseholdName.trim() || "Mi hogar", p_display_name: authDisplayName.trim() || "Yo" }),
         });
       }
-      await cargarHogarYDatos(data.access_token);
+      await cargarHogarYDatos(data);
       setDesbloqueado(true);
     } catch (e) {
       setAuthError(e.message);
@@ -1397,7 +1455,7 @@ export default function FinanzasApp() {
       });
       safeSet("auth_session", data);
       setSession(data);
-      await cargarHogarYDatos(data.access_token);
+      await cargarHogarYDatos(data);
       setDesbloqueado(true);
     } catch (e) {
       setAuthError(e.message);
@@ -1420,7 +1478,7 @@ export default function FinanzasApp() {
           body: JSON.stringify({ p_name: authHouseholdName.trim() || "Mi hogar", p_display_name: authDisplayName.trim() || "Yo" }),
         });
       }
-      await cargarHogarYDatos(session.access_token);
+      await cargarHogarYDatos(session);
       setDesbloqueado(true);
     } catch (e) {
       setAuthError(e.message);
@@ -1431,6 +1489,7 @@ export default function FinanzasApp() {
   function handleLogout() {
     safeSet("auth_session", null);
     setAccessToken(null);
+    setRefreshToken(null);
     setSession(null);
     setHouseholdId(null);
     setProfileName(null);
@@ -1915,8 +1974,14 @@ export default function FinanzasApp() {
 
   if (loadError) {
     return (
-      <div style={{ minHeight: "100vh", background: PAPER, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Inter, sans-serif", color: BRICK, padding: 24, textAlign: "center", whiteSpace: "pre-wrap" }}>
-        {loadError}
+      <div style={{ minHeight: "100vh", background: PAPER, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "Inter, sans-serif", color: BRICK, padding: 24, textAlign: "center", whiteSpace: "pre-wrap", gap: 16 }}>
+        <div>{loadError}</div>
+        <button
+          onClick={() => { setLoading(true); setLoadError(null); intentarRestaurarSesion(); }}
+          style={{ ...btnPrimary, padding: "10px 20px" }}
+        >
+          Reintentar
+        </button>
       </div>
     );
   }
@@ -2240,6 +2305,28 @@ export default function FinanzasApp() {
       )}
 
       <div style={{ maxWidth: isDesktop ? 1080 : 720, margin: "0 auto", padding: "0 16px" }}>
+        {biometriaSoportada && !biometriaActiva && !bannerBiometriaCerrado && (
+          <div style={{ marginTop: 16, background: "#fff", border: `1.5px solid ${TEAL}`, borderRadius: 10, padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12.5, color: INK }}>
+              🔐 Este dispositivo tiene Face ID / Touch ID / huella disponible — activalo para abrir la app sin escribir usuario y contraseña cada vez.
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+              {bioError && <div style={{ color: BRICK, fontSize: 11 }}>{bioError}</div>}
+              <button
+                onClick={activarBiometria}
+                disabled={bioBusy}
+                style={{ ...btnPrimary, padding: "6px 12px", fontSize: 12.5 }}
+              >
+                {bioBusy ? "Confirmando..." : "Activar ahora"}
+              </button>
+              <button
+                onClick={() => { safeSet("banner_biometria_cerrado", true); setBannerBiometriaCerrado(true); }}
+                style={{ background: "none", border: "none", color: "#8a9698", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 4px" }}
+                aria-label="Cerrar aviso"
+              >×</button>
+            </div>
+          </div>
+        )}
         {menuTabs.includes(tab) ? (
           <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 10 }}>
             <button
