@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v122 · 2026-08-06 · fix real de Mercado Pago (probado contra un PDF real): el pie de página fijo del PDF ("Fecha de generación: DD-MM-AAAA") tiene el mismo formato que una fecha de movimiento — el regex la tomaba como transacción real y se tragaba todo el texto del pie de página hasta la próxima transacción de verdad, perdiéndola y generando una fila con descripción gigante. Se limpia ese texto antes de parsear. Además, en BBVA: el aviso de "total de consumos no coincide" ya no se duplica (el dato aparece dos veces en el mismo resumen) y ahora usa tolerancia relativa de 1% del total (con piso de $1) en vez de un monto fijo, para no marcar como error una diferencia de redondeo en resúmenes grandes
-const APP_VERSION = "v122 · 2026-08-06";
+// v123 · 2026-08-06 · (1) "Gasto por tarjeta, mes a mes" ya no usa la tabla ancha rota en escritorio — ahora usa el mismo layout de tarjetas que ya andaba bien en el celu (sin scroll horizontal), y tiene su PROPIO selector de rango (3M/6M/12M/24M/Todo), independiente de "Evolución" — así se ve claro cómo mirar meses más viejos; (2) "⚠️ Aumentos de gasto" ahora es plegable, arranca cerrado mostrando solo un resumen de una línea, con botón para desplegar el detalle; (3) Movimientos: nuevo filtro de fecha puntual o rango (Desde/Hasta), independiente del buscador de texto
+const APP_VERSION = "v123 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -2934,6 +2934,8 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
   // dispositivo para no tener que reconfigurarlo cada vez.
   const [umbralAlerta, setUmbralAlerta] = useState(() => Number(safeGet("umbral_alerta_gastos")) || 20);
   useEffect(() => { safeSet("umbral_alerta_gastos", umbralAlerta); }, [umbralAlerta]);
+  // Plegada por defecto — ocupaba mucho lugar arriba de todo lo demás.
+  const [alertasAbiertas, setAlertasAbiertas] = useState(false);
 
   const alertasGasto = useMemo(() => {
     const [y, m] = selectedMonth.split("-").map(Number);
@@ -3067,9 +3069,11 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
     return Object.entries(map).sort((a, b) => b[1] - a[1]).map(([label]) => label);
   }, [entries]);
 
-  // Mismo rango de meses que "Evolución"/"Resumen mensual" de arriba,
-  // pero con el gasto de cada mes abierto por tarjeta/titular en vez de
-  // sumado en un solo total.
+  // Rango propio para "Gasto por tarjeta, mes a mes" — independiente del
+  // selector de "Evolución" de arriba. Antes compartían el mismo rango y
+  // no quedaba claro cómo ver meses más viejos en la tabla de tarjetas
+  // sin ir a cambiar el selector de otra sección.
+  const [rangoTarjetas, setRangoTarjetas] = useState(6);
   const chartDataTarjetasPorCuenta = useMemo(() => {
     function calcularMesPorCuenta(key) {
       const [y, m] = key.split("-").map(Number);
@@ -3084,12 +3088,9 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
       });
       return fila;
     }
-    if (compareMode) {
-      return [...comparedMonths].sort().map(calcularMesPorCuenta);
-    }
     const now = new Date();
-    let mesesAMostrar = rango;
-    if (rango === "todo") {
+    let mesesAMostrar = rangoTarjetas;
+    if (rangoTarjetas === "todo") {
       const fechas = entries.map((e) => e.date).filter(Boolean).sort();
       if (fechas.length === 0) return [];
       const primera = new Date(fechas[0] + "-01");
@@ -3103,7 +3104,7 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
       months.push(calcularMesPorCuenta(key));
     }
     return months;
-  }, [entries, rango, compareMode, comparedMonths, cuentasTarjetaLabels]);
+  }, [entries, rangoTarjetas, cuentasTarjetaLabels]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -3161,41 +3162,56 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
       )}
 
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+        <div
+          onClick={() => setAlertasAbiertas((v) => !v)}
+          style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, cursor: "pointer" }}
+        >
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>⚠️ Aumentos de gasto</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8a9698" }}>
-            Avisame si sube más de
-            <input
-              type="number"
-              value={umbralAlerta}
-              onChange={(e) => setUmbralAlerta(Math.max(1, Number(e.target.value) || 1))}
-              style={{ width: 52, padding: "3px 6px", borderRadius: 6, border: "1px solid #ddd6c4", fontSize: 12.5, textAlign: "center" }}
-            />
-            %
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {!alertasAbiertas && (
+              <span style={{ fontSize: 12, color: alertasGasto.length > 0 ? BRICK : "#8a9698", fontWeight: alertasGasto.length > 0 ? 700 : 400 }}>
+                {alertasGasto.length === 0 ? "Nada relevante" : `${alertasGasto.length} categoría${alertasGasto.length > 1 ? "s" : ""} subió más de ${umbralAlerta}%`}
+              </span>
+            )}
+            <span style={{ fontSize: 12, color: TEAL, fontWeight: 700 }}>{alertasAbiertas ? "Ocultar ▲" : "Ver detalle ▼"}</span>
           </div>
         </div>
-        <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 12 }}>
-          Comparando el mes que estás mirando con el anterior.
-        </div>
-        {alertasGasto.length === 0 ? (
-          <EmptyState text={`Ninguna categoría subió más de ${umbralAlerta}% respecto al mes anterior.`} />
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {alertasGasto.map((a) => (
-              <div key={a.categoria} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "#fbeee6", borderRadius: 8 }}>
-                <div>
-                  <div style={{ fontSize: 13.5, fontWeight: 700 }}>{a.categoria}</div>
-                  <div style={{ fontSize: 11.5, color: "#8a9698" }}>
-                    {a.nueva ? "Sin gasto el mes anterior" : `${fmtARS(a.anterior)} → ${fmtARS(a.actual)}`}
+        {alertasAbiertas && (
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 6, fontSize: 12, color: "#8a9698", marginTop: 10 }}>
+              Avisame si sube más de
+              <input
+                type="number"
+                value={umbralAlerta}
+                onChange={(e) => setUmbralAlerta(Math.max(1, Number(e.target.value) || 1))}
+                style={{ width: 52, padding: "3px 6px", borderRadius: 6, border: "1px solid #ddd6c4", fontSize: 12.5, textAlign: "center" }}
+              />
+              %
+            </div>
+            <div style={{ fontSize: 12, color: "#8a9698", margin: "10px 0 12px" }}>
+              Comparando el mes que estás mirando con el anterior.
+            </div>
+            {alertasGasto.length === 0 ? (
+              <EmptyState text={`Ninguna categoría subió más de ${umbralAlerta}% respecto al mes anterior.`} />
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {alertasGasto.map((a) => (
+                  <div key={a.categoria} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: "#fbeee6", borderRadius: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 13.5, fontWeight: 700 }}>{a.categoria}</div>
+                      <div style={{ fontSize: 11.5, color: "#8a9698" }}>
+                        {a.nueva ? "Sin gasto el mes anterior" : `${fmtARS(a.anterior)} → ${fmtARS(a.actual)}`}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color: BRICK, fontSize: 14 }}>{fmtARS(a.actual)}</div>
+                      <div style={{ fontSize: 11.5, fontWeight: 700, color: BRICK }}>{a.nueva ? "Nuevo" : `+${Math.round(a.variacion)}%`}</div>
+                    </div>
                   </div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, color: BRICK, fontSize: 14 }}>{fmtARS(a.actual)}</div>
-                  <div style={{ fontSize: 11.5, fontWeight: 700, color: BRICK }}>{a.nueva ? "Nuevo" : `+${Math.round(a.variacion)}%`}</div>
-                </div>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
       </div>
 
@@ -3412,42 +3428,25 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
       </div>
 
       <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
-        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 4 }}>Gasto por tarjeta, mes a mes</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17 }}>Gasto por tarjeta, mes a mes</div>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {[[3, "3M"], [6, "6M"], [12, "12M"], [24, "24M"], ["todo", "Todo"]].map(([v, l]) => (
+              <button key={l} onClick={() => setRangoTarjetas(v)} style={{
+                padding: "5px 10px", borderRadius: 16, fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                border: `1px solid ${rangoTarjetas === v ? TEAL : "#ddd6c4"}`,
+                background: rangoTarjetas === v ? TEAL : "#fff", color: rangoTarjetas === v ? "#fff" : INK
+              }}>{l}</button>
+            ))}
+          </div>
+        </div>
         <div style={{ fontSize: 12, color: "#8a9698", marginBottom: 12 }}>
-          Cada tarjeta por separado (no sumadas) — y, dentro de una misma tarjeta compartida, separado también por titular cuando el resumen lo distingue. Usa el mismo rango elegido arriba en "Evolución".
+          Cada tarjeta por separado (no sumadas) — y, dentro de una misma tarjeta compartida, separado también por titular cuando el resumen lo distingue. Elegí arriba cuántos meses ver — tiene su propio rango, independiente de "Evolución".
         </div>
         {cuentasTarjetaLabels.length === 0 ? (
           <EmptyState text="Todavía no hay gastos de tarjeta cargados." />
-        ) : isDesktop ? (
-          <div style={{ overflowX: "auto" }}>
-            <div style={{ minWidth: 160 + (cuentasTarjetaLabels.length + 1) * 130, maxHeight: 420, overflowY: "auto" }}>
-              <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8a9698", paddingBottom: 8, borderBottom: "1px solid #eee6d5", position: "sticky", top: 0, background: "#fff", zIndex: 1 }}>
-                <div style={{ flex: "0 0 120px" }}>Mes</div>
-                {cuentasTarjetaLabels.map((c) => (
-                  <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>{c}</div>
-                ))}
-                <div style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4 }}>Total tarjeta</div>
-              </div>
-              {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => {
-                const total = cuentasTarjetaLabels.reduce((s, c) => s + (m[c] || 0), 0);
-                return (
-                  <div key={i} style={{ display: "flex", padding: "8px 0", borderBottom: "1px solid #f2eee2", fontSize: 12.5, alignItems: "center" }}>
-                    <div style={{ flex: "0 0 120px", fontWeight: 600 }}>{m.mes}</div>
-                    {cuentasTarjetaLabels.map((c) => (
-                      <div key={c} style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", color: m[c] > 0 ? INK : "#ccc4ae" }}>
-                        {m[c] > 0 ? fmtARS(m[c]) : "—"}
-                      </div>
-                    ))}
-                    <div style={{ flex: "0 0 130px", textAlign: "right", paddingRight: 4, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap", fontWeight: 700, color: total > 0 ? INK : "#ccc4ae" }}>
-                      {total > 0 ? fmtARS(total) : "—"}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 460, overflowY: "auto", paddingRight: 4 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 520, overflowY: "auto", paddingRight: 4 }}>
             {[...chartDataTarjetasPorCuenta].reverse().map((m, i) => {
               const total = cuentasTarjetaLabels.reduce((s, c) => s + (m[c] || 0), 0);
               return (
@@ -3456,18 +3455,20 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
                   {cuentasTarjetaLabels.filter((c) => m[c] > 0).length === 0 ? (
                     <div style={{ fontSize: 12, color: "#8a9698" }}>Sin gastos de tarjeta este mes.</div>
                   ) : (
-                    <>
+                    <div style={isDesktop ? { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", columnGap: 20, rowGap: 3 } : undefined}>
                       {cuentasTarjetaLabels.filter((c) => m[c] > 0).map((c) => (
                         <div key={c} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
                           <span style={{ color: "#8a9698" }}>{c}</span>
                           <span style={{ color: GOLD, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(m[c])}</span>
                         </div>
                       ))}
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, paddingTop: 5, marginTop: 3, borderTop: "1px dashed #eee6d5" }}>
-                        <span style={{ fontWeight: 700 }}>Total tarjeta</span>
-                        <span style={{ fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(total)}</span>
-                      </div>
-                    </>
+                    </div>
+                  )}
+                  {cuentasTarjetaLabels.filter((c) => m[c] > 0).length > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, paddingTop: 5, marginTop: 3, borderTop: "1px dashed #eee6d5" }}>
+                      <span style={{ fontWeight: 700 }}>Total tarjeta</span>
+                      <span style={{ fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>{fmtARS(total)}</span>
+                    </div>
                   )}
                 </div>
               );
@@ -3491,9 +3492,12 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
   const [filter, setFilter] = useState("todos");
   const [busq, setBusq] = useState("");
   const [alcance, setAlcance] = useState("mes"); // "mes" | "historial"
+  const [fechaDesde, setFechaDesde] = useState("");
+  const [fechaHasta, setFechaHasta] = useState("");
   const [editingId, setEditingId] = useState(null);
   const buscando = busq.trim().length > 0;
-  const usaTodo = alcance === "historial";
+  const usaRangoFecha = Boolean(fechaDesde || fechaHasta);
+  const usaTodo = alcance === "historial" || usaRangoFecha;
 
   const base = usaTodo ? allEntries : entries;
   const filtered = base.filter((e) => {
@@ -3501,6 +3505,10 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
       : filter === "pendientes" ? (e.type === "gasto" && e.pagado === false)
       : e.type === filter;
     if (!pasaTipo) return false;
+    if (usaRangoFecha) {
+      if (fechaDesde && (e.date || "") < fechaDesde) return false;
+      if (fechaHasta && (e.date || "") > fechaHasta) return false;
+    }
     if (!buscando) return true;
     const q = busq.trim().toLowerCase();
     const qNum = Number(busq.trim().replace(/\./g, "").replace(",", "."));
@@ -3542,12 +3550,37 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
       />
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
         {[["mes", "Buscar en el mes"], ["historial", "Buscar en todo el historial"]].map(([k, l]) => (
-          <button key={k} onClick={() => setAlcance(k)} style={{
-            padding: "6px 12px", borderRadius: 20, fontSize: 12, cursor: "pointer",
-            border: `1px solid ${alcance === k ? GOLD : "#ddd6c4"}`,
-            background: alcance === k ? GOLD : "#fff", color: alcance === k ? "#fff" : INK, fontWeight: 600
+          <button key={k} onClick={() => setAlcance(k)} disabled={usaRangoFecha} style={{
+            padding: "6px 12px", borderRadius: 20, fontSize: 12, cursor: usaRangoFecha ? "default" : "pointer",
+            border: `1px solid ${alcance === k && !usaRangoFecha ? GOLD : "#ddd6c4"}`,
+            background: alcance === k && !usaRangoFecha ? GOLD : "#fff", color: alcance === k && !usaRangoFecha ? "#fff" : INK, fontWeight: 600,
+            opacity: usaRangoFecha ? 0.5 : 1,
           }}>{l}</button>
         ))}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 14, padding: "8px 10px", background: usaRangoFecha ? "#fbf1de" : PAPER_DIM, borderRadius: 8 }}>
+        <span style={{ fontSize: 12, color: "#8a9698", fontWeight: 600 }}>O elegí una fecha puntual / rango:</span>
+        <input
+          type="date"
+          value={fechaDesde}
+          onChange={(e) => setFechaDesde(e.target.value)}
+          style={{ ...inputStyle, padding: "5px 8px", fontSize: 12.5, width: 140 }}
+          aria-label="Desde"
+        />
+        <span style={{ fontSize: 12, color: "#8a9698" }}>a</span>
+        <input
+          type="date"
+          value={fechaHasta}
+          onChange={(e) => setFechaHasta(e.target.value)}
+          style={{ ...inputStyle, padding: "5px 8px", fontSize: 12.5, width: 140 }}
+          aria-label="Hasta"
+        />
+        <span style={{ fontSize: 11, color: "#8a9698" }}>(dejá "Hasta" vacío para desde esa fecha en adelante; poné la misma en las dos para un solo día)</span>
+        {usaRangoFecha && (
+          <button onClick={() => { setFechaDesde(""); setFechaHasta(""); }} style={{ background: "none", border: `1px solid ${BRICK}`, color: BRICK, borderRadius: 6, fontSize: 11.5, padding: "4px 10px", cursor: "pointer", fontWeight: 700 }}>
+            ✕ Quitar filtro de fecha
+          </button>
+        )}
       </div>
       <div
         style={{
