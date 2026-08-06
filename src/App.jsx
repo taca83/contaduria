@@ -66,8 +66,8 @@ function clasificarMedioPago(cuenta) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v104 · 2026-08-03 · fix recuperación de contraseña: la pantalla "nueva contraseña" ahora se detecta antes del render y tiene prioridad (ya no cae a login aunque haya sesión vieja); campo de contraseña ya no se sale de rango (box-sizing en todas las pantallas)
-const APP_VERSION = "v104 · 2026-08-03";
+// v105 · 2026-08-03 · fix: la fecha de las cuotas ya no depende únicamente del encabezado del PDF — si "Cierre actual" no se pudo leer, se calcula sola con el consumo sin cuota más reciente del propio resumen (nunca más se quedan con la fecha vieja de la compra original)
+const APP_VERSION = "v105 · 2026-08-03";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -248,11 +248,12 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
   const cuentaMatch = lineas.find((l) => /Visa Signature|Mastercard Black/i.test(l));
   const cuenta = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
 
-  // Fecha de cierre del ciclo actual — la usamos para las cuotas (ver más
-  // abajo) y como respaldo de fecha del "Total a pagar".
+  // Fecha de cierre del ciclo actual, leída del encabezado — la usamos
+  // para las cuotas (ver más abajo) y como respaldo de fecha del "Total a
+  // pagar". Si no se encuentra acá, más abajo hay un respaldo adicional.
   const textoCompletoTmp = lineas.join("\n");
   const cierreMatchTmp = textoCompletoTmp.match(/CIERRE ACTUAL[\s\S]{0,60}?(\d{2})-([A-Za-zÁÉÍÓÚáéíóú]{3})-(\d{2})/i);
-  const fechaCierre = cierreMatchTmp ? fechaBbvaAIso(cierreMatchTmp[1], cierreMatchTmp[2], cierreMatchTmp[3]) : null;
+  const fechaCierreHeader = cierreMatchTmp ? fechaBbvaAIso(cierreMatchTmp[1], cierreMatchTmp[2], cierreMatchTmp[3]) : null;
 
   let seccionActual = null; // "Hernan Israel" | "Natalia Wajsman" | null
   let enSeccionPagos = false;
@@ -310,7 +311,13 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
     bloquePorSeccion[seccionActual].push(linea);
   });
 
+  // Primera pasada: extraemos TODOS los movimientos crudos (sin aplicar
+  // todavía la corrección de fecha de las cuotas), para poder calcular la
+  // fecha del ciclo actual con un respaldo confiable si el encabezado
+  // falla (ver más abajo).
+  const crudosPorSeccion = {};
   Object.entries(bloquePorSeccion).forEach(([persona, lineasSeccion]) => {
+    crudosPorSeccion[persona] = [];
     if (lineasSeccion.length === 0) return;
     const texto = lineasSeccion.join(" ").replace(/\s+/g, " ");
     let m;
@@ -320,8 +327,31 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
       if (!fecha) { avisos.push(`No pude leer la fecha en: "${m[0]}"`); continue; }
       const monto = Number(montoRaw.replace(/\./g, "").replace(",", "."));
       if (!monto) continue;
-
       const cuotaMatch = descRaw.match(/\s*C\.(\d{2})\/(\d{2})\s*$/);
+      crudosPorSeccion[persona].push({ fecha, descRaw, monto, cuotaMatch });
+    }
+  });
+
+  // Fecha del ciclo actual: primero probamos leerla del encabezado
+  // ("CIERRE ACTUAL"). Si el lector de PDF la partió de una forma que no
+  // pudimos reconstruir, la calculamos igual: es la fecha MÁS RECIENTE
+  // entre los consumos que NO son cuota (esos sí guardan su fecha real de
+  // este ciclo, a diferencia de las cuotas que arrastran la fecha de la
+  // compra original).
+  let fechaCierre = fechaCierreHeader;
+  if (!fechaCierre) {
+    const fechasNoCuota = Object.values(crudosPorSeccion)
+      .flat()
+      .filter((c) => !c.cuotaMatch)
+      .map((c) => c.fecha);
+    if (fechasNoCuota.length > 0) {
+      fechaCierre = fechasNoCuota.sort().at(-1);
+      avisos.push(`No encontré "Cierre actual" en el encabezado de ${cuenta} — para las cuotas usé la fecha del consumo más reciente del resumen (${fechaCierre}) en su lugar. Revisá que quede bien.`);
+    }
+  }
+
+  Object.entries(crudosPorSeccion).forEach(([persona, movs]) => {
+    movs.forEach(({ fecha, descRaw, monto, cuotaMatch }) => {
       let desc = descRaw.trim();
       let fechaFinal = fecha;
       if (cuotaMatch) {
@@ -346,7 +376,7 @@ function parsearResumenBBVA(lineas, nombreArchivo, overrides = {}) {
         account: cuenta,
         origen: "pdf_bbva",
       });
-    }
+    });
   });
 
   // Además de los consumos, agregamos el "Total a pagar" del resumen en sí
