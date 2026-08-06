@@ -82,13 +82,17 @@ function etiquetaTarjeta(entry) {
   const esNatalia = entry.persona
     ? /natalia/i.test(entry.persona)
     : /\(Natalia\)\s*$/.test(entry.desc || "");
-  return esNatalia ? `${cuenta} · Natalia` : cuenta;
+  // Si la cuenta ya se llama "Visa Signature Natalia" (porque es su
+  // propia tarjeta, detectada por el destinatario del resumen), no hace
+  // falta repetir el sufijo — sería "... Natalia · Natalia".
+  if (esNatalia && !/natalia/i.test(cuenta)) return `${cuenta} · Natalia`;
+  return cuenta;
 }
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v114 · 2026-08-06 · selector de mes (◀▶) agrandado para tocar más fácil. Parser BBVA: se agregaron 2 validaciones cruzadas contra los propios totales que trae el resumen (saldo anterior vs pagos, y total por titular vs suma línea por línea) que revelaron 2 bugs reales: (1) texto de pie de página pegado a una línea de dato al final de una página rompía el patrón y perdía ese consumo en silencio — ahora se limpia ese ruido antes de parsear; (2) la detección de líneas en USD exigía "USD" como palabra suelta y fallaba con códigos de transacción pegados directo a USD sin espacio (Apple/Google/Anthropic), colando el importe en dólares como si fuera en pesos
-const APP_VERSION = "v114 · 2026-08-06";
+// v115 · 2026-08-06 · el parser de BBVA ahora nombra la cuenta usando el destinatario real del resumen (ej. "Visa Signature Natalia" vs "Visa Signature Hernán"), detectado del sobre — así tu Visa Signature y la de Natalia no quedan mezcladas bajo el mismo nombre genérico cuando cada uno tiene la suya. En resúmenes compartidos (ambos titulares en el mismo PDF) el sufijo "· Natalia" del desglose por tarjeta ya no se duplica si el nombre de cuenta ya lo incluye
+const APP_VERSION = "v115 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -309,7 +313,23 @@ function parsearResumenBBVA(lineasCrudas, nombreArchivo, overrides = {}) {
     .filter(Boolean);
 
   const cuentaMatch = lineas.find((l) => /Visa Signature|Mastercard Black/i.test(l));
-  const cuenta = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
+  const cuentaBase = cuentaMatch ? (cuentaMatch.match(/Visa Signature|Mastercard Black/i) || [])[0] : nombreArchivo;
+
+  // El destinatario del resumen (el nombre que figura en el sobre, ej.
+  // "WAJSMAN NATALIA" o "ISRAEL HERNAN") es el titular REAL de esa
+  // cuenta — lo usamos para distinguir "tu" Visa Signature de la de
+  // Natalia cuando ambos tienen una tarjeta con el mismo nombre
+  // genérico. Sin esto, las dos quedaban mezcladas bajo "Visa
+  // Signature" a secas. Buscamos solo en las líneas ANTES de "Tarjetas
+  // de Crédito" (el destinatario del sobre), para no confundirlo con
+  // los encabezados "Consumos Hernan Israel / Natalia Wajsman" que
+  // aparecen más abajo y pueden estar presentes los dos en un mismo PDF.
+  const idxTarjetas = lineas.findIndex((l) => /^Tarjetas de Cr[ée]dito/i.test(l));
+  const textoDestinatario = (idxTarjetas > 0 ? lineas.slice(0, idxTarjetas) : lineas.slice(0, 15)).join(" ");
+  let titularCuenta = null;
+  if (/WAJSMAN\s+NATALIA/i.test(textoDestinatario)) titularCuenta = "Natalia";
+  else if (/ISRAEL\s+HERNAN/i.test(textoDestinatario)) titularCuenta = "Hernán";
+  const cuenta = titularCuenta ? `${cuentaBase} ${titularCuenta}` : cuentaBase;
 
   const textoCompleto = lineas.join("\n");
 
