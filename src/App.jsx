@@ -3549,7 +3549,7 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
 
   const base = usaTodo ? allEntries : entries;
   const filtered = base.filter((e) => {
-    const pasaTipo = filter === "todos" ? (e.type === "gasto" || e.type === "ingreso")
+    const pasaTipo = filter === "todos" ? (e.type === "gasto" || e.type === "ingreso" || e.type === "cambio")
       : filter === "pendientes" ? (e.type === "gasto" && e.pagado === false)
       : e.type === filter;
     if (!pasaTipo) return false;
