@@ -93,7 +93,8 @@ function etiquetaTarjeta(entry) {
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
 // v126 · 2026-08-06 · dos pedidos: (1) nuevo modo "PDF (detecta el formato solo)" en Importar — sube uno o varios PDFs mezclados (BBVA/Mercado Pago/colegio) y cada uno se procesa con el parser que corresponde, sin elegirlo a mano; (2) nuevo modo "Captura de pantalla (ARQ, etc.)" que lee varios movimientos de una sola captura con IA (vía una Edge Function nueva de Supabase, analizar-movimientos — requiere desplegarla una vez, ver archivo aparte) — separa transferencias, ingresos y cambios de divisa automáticamente
 // v127 · 2026-08-06 · en Movimientos, el chip "Ingresos" ahora también muestra los movimientos tipo "cambio" (USD→ARS) además del propio chip "Cambios USD" — conceptualmente son plata que entra, así que aparecen en los dos lugares
-const APP_VERSION = "v127 · 2026-08-06";
+// v128 · 2026-08-06 · el eje vertical del gráfico "Evolución" ahora muestra pesos con signo $, usando "M" (millones) para valores grandes y "k" (miles) para los chicos, en vez de siempre dividir por mil sin símbolo de moneda
+const APP_VERSION = "v128 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -3390,7 +3391,12 @@ function ResumenTab({ gastosPorCategoria, totalAhorradoHistorico, entries, thisM
               <BarChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eee6d5" vertical={false} />
                 <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} interval={xAxisInterval} />
-                <YAxis tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} width={40} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
+                <YAxis tick={{ fontSize: 11, fill: "#8a9698" }} axisLine={false} tickLine={false} width={48} tickFormatter={(v) => {
+                  const abs = Math.abs(v);
+                  if (abs >= 1_000_000) return `$${(v / 1_000_000).toFixed(abs % 1_000_000 === 0 ? 0 : 1)}M`;
+                  if (abs >= 1_000) return `$${Math.round(v / 1000)}k`;
+                  return `$${Math.round(v)}`;
+                }} />
                 <Tooltip formatter={(v) => fmtARS(v)} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Bar dataKey="Ingresos" fill={GREEN} radius={[3, 3, 0, 0]} />
