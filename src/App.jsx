@@ -91,8 +91,8 @@ function etiquetaTarjeta(entry) {
 
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
-// v124 · 2026-08-06 · encontrada la causa de "veo menos importaciones de las que hice": cuando se suben varios PDFs juntos (selección múltiple) y se confirma la importación de una sola vez, quedaba registrado como UN SOLO evento en el historial, sin importar cuántos archivos incluía — así "6 importaciones" podían representar más de 15 documentos reales. Ahora cada evento del historial guarda los nombres de los archivos que incluyó, y "Importaciones de datos" los muestra (con el conteo de archivos si son varios). Esto aplica a partir de ahora — las importaciones ya hechas no se pueden reconstruir retroactivamente, esa info no se guardó en su momento
-const APP_VERSION = "v124 · 2026-08-06";
+// v126 · 2026-08-06 · dos pedidos: (1) nuevo modo "PDF (detecta el formato solo)" en Importar — sube uno o varios PDFs mezclados (BBVA/Mercado Pago/colegio) y cada uno se procesa con el parser que corresponde, sin elegirlo a mano; (2) nuevo modo "Captura de pantalla (ARQ, etc.)" que lee varios movimientos de una sola captura con IA (vía una Edge Function nueva de Supabase, analizar-movimientos — requiere desplegarla una vez, ver archivo aparte) — separa transferencias, ingresos y cambios de divisa automáticamente
+const APP_VERSION = "v126 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -1216,6 +1216,41 @@ export default function FinanzasApp() {
   const [session, setSession] = useState(null); // { access_token, refresh_token, user }
   const [householdId, setHouseholdId] = useState(null);
 
+  // Detecta sola cuando se publicó una versión nueva (después de
+  // /publicar), sin que haga falta cerrar y volver a abrir la app. Compara
+  // el HTML que Vercel está sirviendo AHORA contra el que quedó cargado
+  // cuando arrancó esta sesión — si cambió, es porque hubo un deploy
+  // nuevo (los nombres de archivo de Vite cambian con cada build). Se
+  // revisa cada 3 minutos y también al volver a la pestaña/app.
+  const [hayVersionNueva, setHayVersionNueva] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let htmlBase = null;
+    let cancelado = false;
+    async function chequearVersionNueva() {
+      try {
+        const res = await fetch(`/?_v=${Date.now()}`, { cache: "no-store" });
+        const html = await res.text();
+        if (cancelado) return;
+        if (htmlBase === null) { htmlBase = html; return; } // primera lectura: solo fija la base de comparación
+        if (html !== htmlBase) setHayVersionNueva(true);
+      } catch {
+        // sin conexión o falla de red puntual — no pasa nada, se reintenta solo
+      }
+    }
+    chequearVersionNueva();
+    const intervalo = setInterval(chequearVersionNueva, 3 * 60 * 1000);
+    const alVolver = () => { if (document.visibilityState === "visible") chequearVersionNueva(); };
+    document.addEventListener("visibilitychange", alVolver);
+    window.addEventListener("focus", chequearVersionNueva);
+    return () => {
+      cancelado = true;
+      clearInterval(intervalo);
+      document.removeEventListener("visibilitychange", alVolver);
+      window.removeEventListener("focus", chequearVersionNueva);
+    };
+  }, []);
+
   // Cada vez que sb() renueva el access_token sola (a mitad de una
   // sesión larga), avisa acá — guardamos la sesión nueva en localStorage
   // y actualizamos el estado de React, para que quede todo sincronizado
@@ -2188,6 +2223,18 @@ export default function FinanzasApp() {
         .cat-row:hover { background: ${PAPER_DIM}; }
         ::-webkit-scrollbar { height: 6px; width: 6px; }
       `}</style>
+
+      {hayVersionNueva && (
+        <div style={{ position: "sticky", top: 0, zIndex: 50, background: GOLD, color: "#fff", padding: "9px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap", fontSize: 13, fontWeight: 600 }}>
+          🔄 Hay una versión nueva de la app.
+          <button
+            onClick={() => window.location.reload()}
+            style={{ background: "#fff", color: GOLD, border: "none", borderRadius: 6, padding: "4px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}
+          >
+            Actualizar ahora
+          </button>
+        </div>
+      )}
 
       {/* Header */}
       <div style={{ background: INK, color: PAPER, padding: "20px 20px 26px" }}>
@@ -3927,7 +3974,7 @@ function parseCSV(text) {
 }
 
 function ImportarTab({ onImport, categoryOverrides }) {
-  const [modo, setModo] = useState("bbva"); // "bbva" | "mercadopago" | "colegio" | "csv"
+  const [modo, setModo] = useState("auto"); // "auto" | "bbva" | "mercadopago" | "colegio" | "csv"
   const [text, setText] = useState("");
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -3937,6 +3984,153 @@ function ImportarTab({ onImport, categoryOverrides }) {
   const [pdfAvisos, setPdfAvisos] = useState([]);
   const [pdfNombres, setPdfNombres] = useState([]);
   const [pdfResumenes, setPdfResumenes] = useState([]);
+
+  // Detecta el formato de cada PDF por su propio contenido (no hace
+  // falta elegir el banco/billetera de antemano) y lo manda al parser
+  // que corresponda. Si no reconoce ninguno, avisa en vez de forzar un
+  // parser equivocado.
+  async function handlePdfFilesAuto(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setPdfProcesando(true);
+    setPdfAvisos([]);
+    setPdfNombres(files.map((f) => f.name));
+    setPdfResumenes([]);
+    let todasLasFilas = [];
+    let avisos = [];
+    let resumenes = [];
+    for (const file of files) {
+      try {
+        const texto = await conTimeout(extraerTextoPdf(file), 30000, `${file.name}: tardó demasiado en procesarse (más de 30s), lo salteo.`);
+        let formatoDetectado = null;
+        if (/ASOCIACI[ÓO]N ORT ARGENTINA/i.test(texto) || /COMUNIDAD BETEL/i.test(texto)) {
+          formatoDetectado = "colegio";
+        } else if (/Mercado\s*Pago/i.test(texto) && /(RESUMEN DE CUENTA|ID de la operaci[óo]n)/i.test(texto)) {
+          formatoDetectado = "mercadopago";
+        } else if (/BBVA/i.test(texto) && /(Visa Signature|Mastercard Black)/i.test(texto)) {
+          formatoDetectado = "bbva";
+        }
+
+        if (formatoDetectado === "bbva") {
+          const lineas = await conTimeout(extraerLineasPdf(file), 30000, `${file.name}: tardó demasiado en procesarse (más de 30s), lo salteo.`);
+          const { filas, avisos: av, resumenInfo } = parsearResumenBBVA(lineas, file.name, categoryOverrides);
+          if (resumenInfo) {
+            const sumaFilas = filas.reduce((s, f) => s + Number(f.amount), 0);
+            resumenes.push({ archivo: file.name, cuenta: resumenInfo.cuenta, total: resumenInfo.total, sumaFilas });
+          }
+          todasLasFilas = todasLasFilas.concat(filas);
+          avisos = avisos.concat(av.map((a) => `${file.name} (BBVA): ${a}`));
+        } else if (formatoDetectado === "mercadopago") {
+          const { filas, avisos: av } = parsearResumenMercadoPago(texto, categoryOverrides);
+          todasLasFilas = todasLasFilas.concat(filas);
+          avisos = avisos.concat(av.map((a) => `${file.name} (Mercado Pago): ${a}`));
+        } else if (formatoDetectado === "colegio") {
+          const { filas, avisos: av } = parsearFacturaColegio(texto, categoryOverrides);
+          todasLasFilas = todasLasFilas.concat(filas);
+          avisos = avisos.concat(av.map((a) => `${file.name} (Colegio): ${a}`));
+        } else {
+          avisos.push(`${file.name}: no reconocí el formato (no parece ser BBVA, Mercado Pago, ni un colegio soportado por ahora). Pasámelo a mí en el chat para agregar ese formato.`);
+        }
+      } catch (err) {
+        avisos.push(`${file.name}: no pude leer el PDF (${err.message}).`);
+      }
+    }
+    setPdfAvisos(avisos);
+    setPdfResumenes(resumenes);
+    setResult({ rows: todasLasFilas, errors: [] });
+    setPdfProcesando(false);
+  }
+
+  // Achica una imagen antes de mandarla a analizar (mismo criterio que la
+  // foto de recibo individual: para leer texto alcanza con bastante menos
+  // que lo que saca la cámara, así sale más rápido y barato).
+  function comprimirImagen(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const maxAncho = 1280;
+          const escala = Math.min(1, maxAncho / img.width);
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.round(img.width * escala);
+          canvas.height = Math.round(img.height * escala);
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8);
+        };
+        img.onerror = reject;
+        img.src = e.target.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Lee una o varias capturas de pantalla que muestran VARIOS movimientos
+  // juntos (ej. el listado de "Transacciones" de ARQ: transferencias
+  // enviadas, recibidas, y cambios de divisa) y arma las filas para
+  // importar, igual que con un PDF.
+  async function handleCapturas(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    setPdfProcesando(true);
+    setPdfAvisos([]);
+    setPdfNombres(files.map((f) => f.name));
+    setPdfResumenes([]);
+    let todasLasFilas = [];
+    let avisos = [];
+    for (const file of files) {
+      try {
+        const blob = await comprimirImagen(file);
+        const image_base64 = await blobToBase64(blob);
+        const resultado = await conTimeout(
+          sbFunction("analizar-movimientos", { image_base64, mime_type: "image/jpeg" }),
+          45000,
+          `${file.name}: tardó demasiado en analizarse (más de 45s), la salteo.`
+        );
+        if (resultado?.error) throw new Error(resultado.error);
+        const movimientos = Array.isArray(resultado?.movimientos) ? resultado.movimientos : [];
+        if (movimientos.length === 0) {
+          avisos.push(`${file.name}: no encontré movimientos legibles en esta captura.`);
+        }
+        movimientos.forEach((m) => {
+          if (!m.fecha || !m.monto || !m.tipo) return;
+          if (m.tipo === "cambio") {
+            const montoArs = Number(m.monto_destino ?? m.monto);
+            const montoUsd = Number(m.monto);
+            todasLasFilas.push({
+              date: m.fecha,
+              type: "cambio",
+              category: "Cambio USD→ARS",
+              amount: montoArs,
+              usdAmount: montoUsd,
+              rate: montoUsd > 0 ? Math.round((montoArs / montoUsd) * 100) / 100 : null,
+              desc: m.desc || "Cambio de divisa",
+              account: "ARQ",
+              origen: "foto",
+            });
+          } else {
+            const tipo = m.tipo === "ingreso" ? "ingreso" : "gasto";
+            todasLasFilas.push({
+              date: m.fecha,
+              type: tipo,
+              category: tipo === "gasto" ? inferCategory(m.desc || "", categoryOverrides) : "Otros ingresos",
+              amount: Number(m.monto),
+              desc: m.desc || "",
+              account: "ARQ",
+              origen: "foto",
+            });
+          }
+        });
+      } catch (err) {
+        avisos.push(`${file.name}: no pude leer la captura (${err.message}).`);
+      }
+    }
+    setPdfAvisos(avisos);
+    setResult({ rows: todasLasFilas, errors: [] });
+    setPdfProcesando(false);
+  }
 
   async function handlePdfFiles(e) {
     const files = Array.from(e.target.files || []);
@@ -4094,9 +4288,11 @@ function ImportarTab({ onImport, categoryOverrides }) {
         <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 12 }}>¿Qué querés importar?</div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {[
+            ["auto", "PDF (detecta el formato solo)"],
             ["bbva", "PDF tarjeta BBVA"],
             ["mercadopago", "PDF Mercado Pago"],
             ["colegio", "PDF colegio (arancel)"],
+            ["captura", "Captura de pantalla (ARQ, etc.)"],
             ["csv", "Pegar texto / CSV"],
           ].map(([k, l]) => (
             <button key={k} onClick={() => cambiarModo(k)} style={{
@@ -4107,6 +4303,62 @@ function ImportarTab({ onImport, categoryOverrides }) {
           ))}
         </div>
       </div>
+
+      {modo === "auto" && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Subir PDF (detecta el banco/billetera solo)</div>
+          <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 12 }}>
+            Subí uno o varios PDFs mezclados — de tarjeta BBVA, resumen de Mercado Pago, o arancel de colegio — y cada uno se procesa con el parser que corresponda, sin que tengas que elegirlo vos. Si alguno no se reconoce, avisa cuál.
+          </div>
+          <label style={{ ...btnOutline, cursor: "pointer", marginBottom: 10, display: "inline-flex" }}>
+            <input type="file" accept="application/pdf" multiple onChange={handlePdfFilesAuto} style={{ display: "none" }} />
+            {pdfProcesando ? "Leyendo PDF(s)..." : "Elegir PDF(s)"}
+          </label>
+          {pdfNombres.length > 0 && <div style={{ fontSize: 12, color: TEAL, marginBottom: 8 }}>{pdfNombres.join(", ")}</div>}
+          {pdfResumenes.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: pdfAvisos.length > 0 ? 8 : 0 }}>
+              {pdfResumenes.map((r, i) => {
+                const diff = r.total != null ? Math.round((r.total - r.sumaFilas) * 100) / 100 : null;
+                const coincide = diff !== null && Math.abs(diff) <= 1;
+                return (
+                  <div key={i} style={{ background: coincide ? "#e8f3ec" : "#fdf1de", border: `1px solid ${coincide ? GREEN : GOLD}`, borderRadius: 8, padding: "10px 12px", fontSize: 12.5 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 2 }}>{r.cuenta} <span style={{ fontWeight: 400, color: "#8a9698" }}>({r.archivo})</span></div>
+                    <div>Total del resumen: <b style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{r.total != null ? fmtARS(r.total) : "no encontrado"}</b></div>
+                    <div>Suma de lo que se va a importar: <b style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtARS(r.sumaFilas)}</b></div>
+                    {!coincide && r.total != null && (
+                      <div style={{ color: BRICK, marginTop: 2 }}>⚠ No coincide (diferencia de {fmtARS(Math.abs(diff))}) — revisá los avisos de abajo antes de importar.</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {pdfAvisos.length > 0 && (
+            <div style={{ background: "#fbf1de", border: `1px solid ${GOLD}`, borderRadius: 8, padding: 10, fontSize: 12, marginTop: 4 }}>
+              {pdfAvisos.map((a, i) => <div key={i}>{a}</div>)}
+            </div>
+          )}
+        </div>
+      )}
+
+      {modo === "captura" && (
+        <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, marginBottom: 6 }}>Captura de pantalla con varios movimientos (ARQ, etc.)</div>
+          <div style={{ fontSize: 13, color: "#8a9698", marginBottom: 12 }}>
+            Para apps como ARQ que no dan un PDF descargable — subí la captura de la lista de "Transacciones" tal cual, con todos los movimientos que se vean (transferencias, cambios de divisa). Se leen con IA, quedan a nombre de la cuenta "ARQ", y podés revisar todo antes de confirmar. Podés subir varias capturas juntas si necesitás cubrir más de una pantalla.
+          </div>
+          <label style={{ ...btnOutline, cursor: "pointer", marginBottom: 10, display: "inline-flex" }}>
+            <input type="file" accept="image/*" multiple onChange={handleCapturas} style={{ display: "none" }} />
+            {pdfProcesando ? "Leyendo captura(s)..." : "Elegir captura(s)"}
+          </label>
+          {pdfNombres.length > 0 && <div style={{ fontSize: 12, color: TEAL, marginBottom: 8 }}>{pdfNombres.join(", ")}</div>}
+          {pdfAvisos.length > 0 && (
+            <div style={{ background: "#fbf1de", border: `1px solid ${GOLD}`, borderRadius: 8, padding: 10, fontSize: 12, marginTop: 4 }}>
+              {pdfAvisos.map((a, i) => <div key={i}>{a}</div>)}
+            </div>
+          )}
+        </div>
+      )}
 
       {modo === "mercadopago" && (
         <div style={{ background: "#fff", borderRadius: 10, padding: 18, boxShadow: "0 2px 10px rgba(27,42,46,0.06)" }}>
