@@ -3649,7 +3649,7 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
         ].map(([k, l, Icon]) => {
           const active = filter === k;
           const cantidad = base.filter((e) =>
-            k === "todos" ? (e.type === "gasto" || e.type === "ingreso")
+            k === "todos" ? (e.type === "gasto" || e.type === "ingreso" || e.type === "cambio")
             : k === "pendientes" ? (e.type === "gasto" && e.pagado === false)
             : e.type === k
           ).length;
