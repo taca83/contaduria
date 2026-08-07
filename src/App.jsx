@@ -92,7 +92,8 @@ function etiquetaTarjeta(entry) {
 // Subí este número cada vez que Claude te entregue un archivo nuevo.
 // Sirve para confirmar de un vistazo que el deploy tomó la versión correcta.
 // v126 · 2026-08-06 · dos pedidos: (1) nuevo modo "PDF (detecta el formato solo)" en Importar — sube uno o varios PDFs mezclados (BBVA/Mercado Pago/colegio) y cada uno se procesa con el parser que corresponde, sin elegirlo a mano; (2) nuevo modo "Captura de pantalla (ARQ, etc.)" que lee varios movimientos de una sola captura con IA (vía una Edge Function nueva de Supabase, analizar-movimientos — requiere desplegarla una vez, ver archivo aparte) — separa transferencias, ingresos y cambios de divisa automáticamente
-const APP_VERSION = "v126 · 2026-08-06";
+// v127 · 2026-08-06 · en Movimientos, el chip "Ingresos" ahora también muestra los movimientos tipo "cambio" (USD→ARS) además del propio chip "Cambios USD" — conceptualmente son plata que entra, así que aparecen en los dos lugares
+const APP_VERSION = "v127 · 2026-08-06";
 
 function fmtARS(n) {
   const v = Number(n) || 0;
@@ -3550,6 +3551,7 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
   const base = usaTodo ? allEntries : entries;
   const filtered = base.filter((e) => {
     const pasaTipo = filter === "todos" ? (e.type === "gasto" || e.type === "ingreso" || e.type === "cambio")
+      : filter === "ingreso" ? (e.type === "ingreso" || e.type === "cambio")
       : filter === "pendientes" ? (e.type === "gasto" && e.pagado === false)
       : e.type === filter;
     if (!pasaTipo) return false;
@@ -3650,6 +3652,7 @@ function MovimientosTab({ entries, allEntries, categories, onDelete, onEditDesc,
           const active = filter === k;
           const cantidad = base.filter((e) =>
             k === "todos" ? (e.type === "gasto" || e.type === "ingreso" || e.type === "cambio")
+            : k === "ingreso" ? (e.type === "ingreso" || e.type === "cambio")
             : k === "pendientes" ? (e.type === "gasto" && e.pagado === false)
             : e.type === k
           ).length;
